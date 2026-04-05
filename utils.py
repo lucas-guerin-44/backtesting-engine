@@ -15,6 +15,9 @@ LOCAL_DATA_DIR = "./ohlc_data"
 def fetch_ohlc(instrument: str, timeframe: str, start_date: str, end_date: str, limit: int = 0) -> pd.DataFrame:
     """Fetch OHLC data, using a local CSV cache with API fallback.
 
+    Handles both paginated responses (``{data, pagination}``) from the
+    datalake API and plain JSON arrays from simpler endpoints.
+
     Parameters
     ----------
     instrument : str
@@ -26,7 +29,7 @@ def fetch_ohlc(instrument: str, timeframe: str, start_date: str, end_date: str, 
     end_date : str
         End date in "YYYY-MM-DD" format.
     limit : int
-        Maximum number of rows to fetch (0 = unlimited).
+        Maximum total rows to fetch (0 = all available data).
 
     Returns
     -------
@@ -48,21 +51,50 @@ def fetch_ohlc(instrument: str, timeframe: str, start_date: str, end_date: str, 
             return df
 
     url = f"{DATALAKE_URL}/query"
+    page_size = 10_000
     params = {
         "instrument": instrument,
         "timeframe": timeframe,
         "start": f"{start_date}T00:00:00",
         "end": f"{end_date}T23:59:59",
-        "limit": limit,
+        "limit": page_size,
     }
 
-    resp = requests.get(url, params=params)
-    resp.raise_for_status()
-    data = resp.json()
-    if not data:
+    all_rows = []
+    while True:
+        resp = requests.get(url, params=params)
+        resp.raise_for_status()
+        body = resp.json()
+
+        # Handle both paginated {data, pagination} and plain array responses
+        if isinstance(body, dict) and "data" in body:
+            rows = body["data"]
+            pagination = body.get("pagination", {})
+        elif isinstance(body, list):
+            rows = body
+            pagination = {}
+        else:
+            break
+
+        if not rows:
+            break
+        all_rows.extend(rows)
+
+        # Stop if caller requested a specific limit and we have enough
+        if limit > 0 and len(all_rows) >= limit:
+            all_rows = all_rows[:limit]
+            break
+
+        # Follow cursor for next page, or stop if no more data
+        if pagination.get("has_more") and pagination.get("next_cursor"):
+            params["cursor"] = pagination["next_cursor"]
+        else:
+            break
+
+    if not all_rows:
         return pd.DataFrame(columns=["instrument", "timeframe", "timestamp", "open", "high", "low", "close"])
 
-    df_new = pd.DataFrame(data)
+    df_new = pd.DataFrame(all_rows)
     df_new["timestamp"] = pd.to_datetime(df_new["timestamp"], utc=True)
 
     if not df.empty:

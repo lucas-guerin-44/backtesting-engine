@@ -38,6 +38,8 @@ The engine simulates realistic execution including:
 ├─────────────────────────────────────────────────────┤
 │  backtesting/                                       │
 │    backtest.py       ← event-driven engine (300k/s) │
+│    portfolio_backtest.py ← multi-asset engine       │
+│    allocation.py     ← equal/risk parity/corr-aware │
 │    vectorized.py     ← numpy engine (600k/s)        │
 │    broker.py         ← trade execution, gap stops   │
 │    portfolio.py      ← equity, drawdown, margin     │
@@ -48,6 +50,7 @@ The engine simulates realistic execution including:
 │    strategy.py       ← abstract base class          │
 │    types.py          ← Bar, Trade dataclasses        │
 ├─────────────────────────────────────────────────────┤
+│  portfolio_optimizer.py ← multi-asset optimization  │
 │  utils.py  (data fetching, Sharpe ratio, etc.)      │
 │  config.py (env-based configuration)                │
 └─────────────────────────────────────────────────────┘
@@ -75,7 +78,7 @@ All strategies share a common risk model:
 ### Prerequisites
 
 - Python 3.11+
-- An OHLC data source (the engine expects a datalake API, or local CSV files in `ohlc_data/`)
+- An OHLC data source — built to work with [lucas-guerin-44/datalake-api](https://github.com/lucas-guerin-44/datalake-api) (cursor-paginated), or local CSV files in `ohlc_data/`
 
 ### Installation
 
@@ -354,7 +357,7 @@ At vectorized speed, 1,000 Optuna trials on 3,000 bars completes in ~5 seconds.
 
 ## Testing
 
-153 tests covering:
+175 tests covering:
 
 | Module | Tests | Coverage |
 |---|---|---|
@@ -370,12 +373,73 @@ At vectorized speed, 1,000 Optuna trials on 3,000 bars completes in ~5 seconds.
 | `test_utils.py` | 12 | Sharpe ratio, sanitize, timeframe normalization |
 | `test_types.py` | 5 | Bar and Trade dataclass creation |
 
+| `test_portfolio_backtest.py` | 22 | Allocation schemes, timestamp alignment, shared cash, portfolio optimizer |
+
 ```bash
-python -m pytest tests/ -v  # 153 tests in ~2.7s
+python -m pytest tests/ -v  # 175 tests in ~2.6s
 ```
+
+## Multi-Asset Portfolio Backtesting
+
+The `PortfolioBacktester` runs multiple strategies on multiple assets with shared cash and risk management.
+
+### Allocation schemes
+
+| Scheme | Method | Description |
+|---|---|---|
+| `EqualWeightAllocator` | 1/N | Each asset gets equal capital allocation |
+| `RiskParityAllocator` | Inverse vol | Weight inversely by rolling volatility — equal risk contribution |
+| `CorrelationAwareAllocator` | Risk parity + corr | Reduce weight for correlated assets, increase for uncorrelated |
+
+### Usage
+
+```python
+from backtesting.portfolio_backtest import PortfolioBacktester
+from backtesting.allocation import RiskParityAllocator
+from strategies import TrendFollowingStrategy
+
+pbt = PortfolioBacktester(
+    dataframes={"XAUUSD": df_gold, "EURUSD": df_eur, "BTCUSD": df_btc},
+    strategies={
+        "XAUUSD": TrendFollowingStrategy(),
+        "EURUSD": TrendFollowingStrategy(),
+        "BTCUSD": TrendFollowingStrategy(),
+    },
+    allocator=RiskParityAllocator(),
+    starting_cash=100_000,
+    commission_bps=5.0,
+    slippage_bps=2.0,
+    rebalance_frequency=500,  # Recompute weights every 500 bars
+)
+
+result = pbt.run()
+# result.equity_curve        — combined portfolio equity (np.ndarray)
+# result.per_asset_equity    — per-asset P&L contribution
+# result.per_asset_trades    — trades grouped by symbol
+# result.allocation_history  — weight snapshots over time
+```
+
+Assets with different timestamps are automatically aligned (union + forward-fill). Strategies are only called on real bars.
+
+### Portfolio optimizer
+
+Optimizes per-asset strategy parameters (and optionally allocation weights) at the portfolio level:
+
+```python
+from portfolio_optimizer import StrategyConfig, portfolio_optimize, portfolio_walk_forward
+
+configs = {
+    "XAUUSD": StrategyConfig(TrendFollowingStrategy, {"fast_period": (10, 40), "slow_period": (30, 100)}),
+    "EURUSD": StrategyConfig(TrendFollowingStrategy, {"fast_period": (10, 40), "slow_period": (30, 100)}),
+}
+
+result = portfolio_optimize(configs, dataframes, n_trials=50, objective="sharpe")
+wf = portfolio_walk_forward(configs, dataframes, n_splits=3, n_trials=30)
+```
+
+See `examples/portfolio_demo.py` for a full end-to-end demo with 8 instruments.
 
 ## Known Limitations
 
-- **Single-asset per backtest run.** The Broker/Portfolio support multi-asset positions, but the Backtester orchestrates one instrument at a time.
 - **No volume data** used in execution simulation (fills are assumed regardless of volume).
 - **Bar-level resolution** means intra-bar price path is unknown; execution priority resolves ambiguous bars.
