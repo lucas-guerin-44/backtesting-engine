@@ -470,25 +470,25 @@ At vectorized speed, 1,000 Optuna trials on 3,000 bars completes in ~5 seconds.
 
 ## Testing
 
-180 tests covering:
+192 tests covering:
 
 | Module | Tests | Coverage |
 |---|---|---|
 | `test_backtest.py` | 15 | Engine basics, trade execution, commission/slippage, gap-aware stops, drawdown |
 | `test_broker.py` | 13 | Open/close trades, stop/TP execution, gap fills, buying power, costs |
 | `test_portfolio.py` | 6 | Equity tracking, drawdown, margin call liquidation |
-| `test_portfolio_backtest.py` | 27 | Multi-asset backtester, allocation schemes, regime detection, portfolio optimizer |
+| `test_portfolio_backtest.py` | 32 | Multi-asset backtester, allocation schemes, regime detection, risk limits, portfolio optimizer |
 | `test_data_validation.py` | 18 | OHLC validation: all 9 checks, error vs warning severity |
 | `test_statistics.py` | 18 | Bootstrap CI, permutation test, Deflated Sharpe Ratio |
-| `test_strategies.py` | 22 | ABC, incremental indicators, vectorized indicators, risk sizing, signals |
+| `test_strategies.py` | 25 | ABC, incremental indicators, vectorized indicators, risk sizing, drawdown guard, signals |
 | `test_optimizer.py` | 12 | Single-period, walk-forward, parallel execution, objective functions |
 | `test_results_db.py` | 15 | CRUD, query filtering, walk-forward splits, cascade delete |
 | `test_vectorized.py` | 13 | Vectorized backtester, signal generators, gap-aware stops |
-| `test_utils.py` | 12 | Sharpe ratio, sanitize, timeframe normalization |
+| `test_utils.py` | 18 | Sharpe ratio, frequency inference, sanitize, timeframe normalization |
 | `test_types.py` | 5 | Bar and Trade dataclass creation |
 
 ```bash
-python -m pytest tests/ -v  # 180 tests in ~2.8s
+python -m pytest tests/ -v  # 192 tests in ~2.7s
 ```
 
 ## Known Limitations

@@ -262,7 +262,7 @@ def plot_portfolio(
         ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
         plt.setp(ax2.xaxis.get_majorticklabels(), rotation=30, ha="right")
 
-    fig.tight_layout()
+    fig.subplots_adjust(hspace=0.05, left=0.08, right=0.97, top=0.94, bottom=0.12)
 
     if save_path:
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
