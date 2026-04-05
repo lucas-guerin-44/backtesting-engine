@@ -29,7 +29,7 @@ from backtesting.allocation import (
 )
 from backtesting.backtest import Backtester
 from backtesting.plot import plot_portfolio
-from backtesting.portfolio_backtest import PortfolioBacktester
+from backtesting.portfolio_backtest import PortfolioBacktester, RiskLimits
 from portfolio_optimizer import StrategyConfig, portfolio_optimize, portfolio_walk_forward
 from strategies import (
     DonchianBreakoutStrategy,
@@ -160,6 +160,19 @@ def main():
         ),
     }
 
+    # Portfolio-level risk constraints applied to all runs
+    limits = RiskLimits(
+        max_gross_exposure=0.9,    # Max 90% of equity deployed
+        max_net_exposure=0.80,     # Max 80% net directional exposure
+        max_single_asset=0.25,     # No single asset > 25% of equity
+        max_open_positions=6,      # Max 6 assets with open positions
+    )
+
+    print(f"Risk limits: gross<={limits.max_gross_exposure:.0%}, "
+          f"net<={limits.max_net_exposure:.0%}, "
+          f"per-asset<={limits.max_single_asset:.0%}, "
+          f"max positions={limits.max_open_positions}")
+    print()
     print(f"{'Allocator':<16s} {'Return':>9s} {'Max DD':>8s} {'Sharpe':>8s} "
           f"{'Trades':>7s}")
     print("-" * 52)
@@ -181,6 +194,7 @@ def main():
             slippage_bps=SLIPPAGE_BPS,
             rebalance_frequency=500,
             vol_lookback=500,
+            risk_limits=limits,
         )
         result = pbt.run()
         portfolio_results[alloc_name] = result

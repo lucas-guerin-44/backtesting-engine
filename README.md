@@ -124,6 +124,26 @@ result = pbt.run()
 
 Assets with different timestamps are automatically aligned (union + forward-fill). Strategies are only called on bars where real market data exists.
 
+### Portfolio risk limits
+
+Enforce portfolio-level constraints that are checked before every trade entry:
+
+```python
+from backtesting.portfolio_backtest import RiskLimits
+
+pbt = PortfolioBacktester(
+    dataframes, strategies,
+    risk_limits=RiskLimits(
+        max_gross_exposure=1.0,    # Total |notional| <= 100% of equity
+        max_net_exposure=0.80,     # |long - short| <= 80% of equity
+        max_single_asset=0.25,     # No asset > 25% of equity
+        max_open_positions=6,      # Max 6 assets with open positions
+    ),
+)
+```
+
+Trades that would breach any limit are silently skipped. The Broker's buying power check still applies as a secondary guard.
+
 ### Regime-aware allocation
 
 The `RegimeAllocator` measures cross-asset rolling volatility percentiles to detect market regime, then shifts capital toward strategies that suit the current environment:

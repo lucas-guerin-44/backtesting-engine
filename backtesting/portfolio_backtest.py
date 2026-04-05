@@ -30,6 +30,30 @@ from utils import infer_freq_per_year
 
 
 @dataclass
+class RiskLimits:
+    """Portfolio-level risk constraints checked before each trade entry.
+
+    Parameters
+    ----------
+    max_gross_exposure : float
+        Maximum gross notional as a fraction of equity (e.g., 1.0 = 100%).
+        Gross exposure = sum of |notional| across all positions.
+    max_net_exposure : float
+        Maximum absolute net notional as a fraction of equity.
+        Net exposure = sum of signed notional (long - short).
+    max_single_asset : float
+        Maximum notional for any single asset as a fraction of equity.
+    max_open_positions : int
+        Maximum number of assets with open positions simultaneously.
+        0 = unlimited.
+    """
+    max_gross_exposure: float = 1.0
+    max_net_exposure: float = 1.0
+    max_single_asset: float = 0.30
+    max_open_positions: int = 0
+
+
+@dataclass
 class PortfolioBacktestResult:
     """Result from a multi-asset portfolio backtest."""
     equity_curve: np.ndarray
@@ -79,6 +103,7 @@ class PortfolioBacktester:
         margin_rate: float = 0.0,
         rebalance_frequency: int = 0,
         vol_lookback: int = 60,
+        risk_limits: Optional[RiskLimits] = None,
     ):
         if set(dataframes.keys()) != set(strategies.keys()):
             raise ValueError("dataframes and strategies must have the same keys")
@@ -91,6 +116,7 @@ class PortfolioBacktester:
         self.starting_cash = starting_cash
         self.rebalance_frequency = rebalance_frequency
         self.vol_lookback = vol_lookback
+        self.risk_limits = risk_limits
 
         # Shared portfolio and broker
         self.portfolio = Portfolio(
@@ -173,6 +199,7 @@ class PortfolioBacktester:
         positions = broker.positions
         symbols = self.symbols
         n = self.n
+        risk_limits = self.risk_limits
 
         if execution_priority == "stop_first":
             exit_order = (broker.close_due_to_stop, broker.close_due_to_tp)
@@ -263,6 +290,13 @@ class PortfolioBacktester:
                 new_trade = strats[sym](li, bar, asset_equity)
 
                 if new_trade is not None and new_trade.size > 0:
+                    # Risk limits check
+                    if risk_limits is not None and not self._check_risk_limits(
+                        risk_limits, sym, new_trade, positions, c, i,
+                        symbols, portfolio_equity,
+                    ):
+                        continue
+
                     broker.open_trade(
                         symbol=sym, bar=bar,
                         side=new_trade.side, size=new_trade.size,
@@ -328,3 +362,67 @@ class PortfolioBacktester:
             timestamps=ts,
             allocation_history=allocation_history,
         )
+
+    @staticmethod
+    def _check_risk_limits(
+        limits: RiskLimits,
+        symbol: str,
+        trade: "Trade",
+        positions: Dict[str, List["Trade"]],
+        close_arrays: Dict[str, np.ndarray],
+        bar_idx: int,
+        symbols: List[str],
+        equity: float,
+    ) -> bool:
+        """Check if a proposed trade would violate portfolio risk limits.
+
+        Returns True if the trade is allowed, False if it should be skipped.
+        """
+        if equity <= 0:
+            return False
+
+        new_notional = abs(trade.entry_price * trade.size)
+
+        # Current exposure across all assets
+        gross_exposure = 0.0
+        net_exposure = 0.0
+        asset_notional: Dict[str, float] = {}
+        n_assets_with_positions = 0
+
+        for sym in symbols:
+            sym_notional = 0.0
+            sym_signed = 0.0
+            for tr in positions.get(sym, []):
+                notional = abs(close_arrays[sym][bar_idx] * tr.size)
+                sym_notional += notional
+                sym_signed += close_arrays[sym][bar_idx] * tr.size * tr.side
+            asset_notional[sym] = sym_notional
+            gross_exposure += sym_notional
+            net_exposure += sym_signed
+            if sym_notional > 0:
+                n_assets_with_positions += 1
+
+        # Add the proposed trade's contribution
+        projected_gross = gross_exposure + new_notional
+        projected_net = net_exposure + trade.entry_price * trade.size * trade.side
+        projected_asset = asset_notional.get(symbol, 0.0) + new_notional
+
+        # Check: max gross exposure
+        if projected_gross / equity > limits.max_gross_exposure:
+            return False
+
+        # Check: max net exposure
+        if abs(projected_net) / equity > limits.max_net_exposure:
+            return False
+
+        # Check: max single asset concentration
+        if projected_asset / equity > limits.max_single_asset:
+            return False
+
+        # Check: max open positions (count of assets with positions)
+        if limits.max_open_positions > 0:
+            will_open_new = asset_notional.get(symbol, 0.0) == 0.0
+            if will_open_new and n_assets_with_positions >= limits.max_open_positions:
+                return False
+
+        return True

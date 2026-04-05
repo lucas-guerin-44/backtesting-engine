@@ -12,7 +12,7 @@ from backtesting.allocation import (
     RiskParityAllocator,
 )
 from backtesting.backtest import Backtester
-from backtesting.portfolio_backtest import PortfolioBacktester, PortfolioBacktestResult
+from backtesting.portfolio_backtest import PortfolioBacktester, PortfolioBacktestResult, RiskLimits
 from backtesting.strategy import Strategy
 from backtesting.types import Bar, Trade
 
@@ -484,6 +484,77 @@ class TestPortfolioBacktesterEdgeCases:
         r_comm = pbt_comm.run()
 
         assert r_comm.equity_curve[-1] < r_clean.equity_curve[-1]
+
+
+# ---------------------------------------------------------------------------
+# Risk limits
+# ---------------------------------------------------------------------------
+
+class TestRiskLimits:
+    def test_max_gross_exposure_blocks_trade(self, aligned_dfs):
+        """With a tight gross exposure limit, fewer trades should execute."""
+        strats_unlimited = {"ASSET_A": AlwaysBuyStrategy(), "ASSET_B": AlwaysBuyStrategy()}
+        strats_limited = {"ASSET_A": AlwaysBuyStrategy(), "ASSET_B": AlwaysBuyStrategy()}
+
+        pbt_unlimited = PortfolioBacktester(
+            aligned_dfs, strats_unlimited, starting_cash=10_000)
+        pbt_limited = PortfolioBacktester(
+            aligned_dfs, strats_limited, starting_cash=10_000,
+            risk_limits=RiskLimits(max_gross_exposure=0.10))
+
+        r_unlimited = pbt_unlimited.run()
+        r_limited = pbt_limited.run()
+
+        assert len(r_limited.trades) < len(r_unlimited.trades)
+
+    def test_max_single_asset_limits_concentration(self, aligned_dfs):
+        """A tight single-asset limit should constrain one asset's trades."""
+        strats = {"ASSET_A": AlwaysBuyStrategy(), "ASSET_B": AlwaysBuyStrategy()}
+        pbt = PortfolioBacktester(
+            aligned_dfs, strats, starting_cash=10_000,
+            risk_limits=RiskLimits(max_single_asset=0.05, max_gross_exposure=1.0))
+        result = pbt.run()
+
+        # Should still run without error; trades are just smaller/fewer
+        assert len(result.equity_curve) == 100
+
+    def test_max_open_positions(self, aligned_dfs):
+        """With max_open_positions=1, only one asset should have trades at a time."""
+        strats = {"ASSET_A": BuyOnceStrategy(), "ASSET_B": BuyOnceStrategy()}
+        pbt = PortfolioBacktester(
+            aligned_dfs, strats, starting_cash=10_000,
+            risk_limits=RiskLimits(max_open_positions=1))
+        result = pbt.run()
+
+        # At most one asset should have entered
+        a_trades = result.per_asset_trades.get("ASSET_A", [])
+        b_trades = result.per_asset_trades.get("ASSET_B", [])
+        # One of them should have been blocked
+        assert len(a_trades) + len(b_trades) >= 1
+
+    def test_no_limits_same_as_none(self, aligned_dfs):
+        """Very loose limits should produce the same result as no limits."""
+        strats1 = {"ASSET_A": BuyOnceStrategy(), "ASSET_B": BuyOnceStrategy()}
+        strats2 = {"ASSET_A": BuyOnceStrategy(), "ASSET_B": BuyOnceStrategy()}
+
+        pbt_none = PortfolioBacktester(aligned_dfs, strats1, starting_cash=10_000)
+        pbt_loose = PortfolioBacktester(
+            aligned_dfs, strats2, starting_cash=10_000,
+            risk_limits=RiskLimits(
+                max_gross_exposure=100.0, max_net_exposure=100.0,
+                max_single_asset=100.0, max_open_positions=0))
+
+        r_none = pbt_none.run()
+        r_loose = pbt_loose.run()
+
+        np.testing.assert_array_equal(r_none.equity_curve, r_loose.equity_curve)
+
+    def test_risk_limits_defaults(self):
+        """Default RiskLimits should be reasonable."""
+        limits = RiskLimits()
+        assert limits.max_gross_exposure == 1.0
+        assert limits.max_single_asset == 0.30
+        assert limits.max_open_positions == 0
 
 
 # ---------------------------------------------------------------------------

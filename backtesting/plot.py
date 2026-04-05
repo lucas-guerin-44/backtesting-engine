@@ -260,9 +260,9 @@ def plot_portfolio(
     if timestamps is not None and len(timestamps) > 0 and hasattr(timestamps[0], "date"):
         ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
         ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
-        fig.autofmt_xdate()
+        plt.setp(ax2.xaxis.get_majorticklabels(), rotation=30, ha="right")
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     if save_path:
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
