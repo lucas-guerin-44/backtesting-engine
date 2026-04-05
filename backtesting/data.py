@@ -112,8 +112,8 @@ def validate_ohlc(
 
     ohlc = df[["open", "high", "low", "close"]]
 
-    # 2. Numeric types
-    non_numeric = [col for col in ohlc.columns if not np.issubdtype(ohlc[col].dtype, np.number)]
+    # 2. Numeric types (use api.types to handle pandas extension dtypes like StringDtype)
+    non_numeric = [col for col in ohlc.columns if not pd.api.types.is_numeric_dtype(ohlc[col])]
     if non_numeric:
         report.issues.append(ValidationIssue(
             Severity.ERROR, "dtype", f"Non-numeric OHLC columns: {non_numeric}"))
