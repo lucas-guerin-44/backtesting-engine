@@ -2,25 +2,29 @@
 
 [![Tests](https://github.com/lucas-guerin-44/backtesting-engine/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-guerin-44/backtesting-engine/actions/workflows/test.yml)
 
-An event-driven and vectorized backtesting engine for evaluating trading strategies on historical OHLC data. Built with Python, FastAPI, and Streamlit.
+A multi-asset, event-driven backtesting engine for evaluating trading strategies on historical OHLC data. Supports single-asset and portfolio-level backtesting with cross-asset allocation, regime detection, Bayesian optimization, and walk-forward validation.
+
+Built with Python. Data sourced from [lucas-guerin-44/datalake-api](https://github.com/lucas-guerin-44/datalake-api).
 
 ![Strategy Comparison](docs/strategy_comparison.png)
 *Equity curves for all four strategies on XAUUSD H1 with 5bps commission and 2bps slippage.*
 
 ## What This Does
 
-This engine lets you define trading strategies as Python classes, run them against historical price data, and analyze the results through either:
+Define trading strategies as Python classes, run them against historical price data — individually or as a multi-asset portfolio — and analyze the results.
 
-- A **REST API** (FastAPI) for programmatic access and batch optimization
-- An **interactive dashboard** (Streamlit) for visual exploration and parameter tuning
+**Single-asset backtesting:**
+- Event-driven and vectorized execution engines
+- Gap-aware stop losses (fills at open price when price gaps past stop)
+- Configurable slippage, commission, leverage, and margin with automatic margin-call liquidation
+- OHLC data validation (9 checks for data quality)
+- Statistical significance testing (bootstrap CI, permutation test, Deflated Sharpe Ratio)
 
-The engine simulates realistic execution including:
-- **Gap-aware stop losses** (fills at open price when price gaps past stop, not at the stop level)
-- **Configurable slippage and commission** (basis-point level)
-- **Leverage and margin** with automatic margin-call liquidation
-- **Drawdown tracking** (peak-to-trough)
-- **OHLC data validation** (9 checks for data quality before backtesting)
-- **Statistical significance testing** (bootstrap CI, permutation test, Deflated Sharpe Ratio)
+**Multi-asset portfolio backtesting:**
+- Run different strategies per asset class with shared cash and risk management
+- Four allocation schemes: equal weight, risk parity, correlation-aware, regime-aware
+- Automatic timestamp alignment across assets with different trading hours
+- Portfolio-level Bayesian optimization and walk-forward validation
 
 ## Architecture
 
@@ -28,35 +32,36 @@ The engine simulates realistic execution including:
 ┌─────────────────────────────────────────────────────┐
 │  frontend.py (Streamlit Dashboard)                  │
 │  api.py      (FastAPI REST API)                     │
-│  examples/demo.py (end-to-end demo)                 │
+│  examples/demo.py          (single-asset demo)      │
+│  examples/portfolio_demo.py (multi-asset demo)      │
 ├─────────────────────────────────────────────────────┤
-│  optimizer.py    ← Bayesian search + walk-forward   │
-│  results_db.py   ← SQLite results persistence       │
+│  optimizer.py           ← Bayesian + walk-forward   │
+│  portfolio_optimizer.py ← multi-asset optimization  │
+│  results_db.py          ← SQLite persistence        │
 ├─────────────────────────────────────────────────────┤
 │  strategy_registry.py                               │
 │  strategies.py (4 strategy implementations)         │
 ├─────────────────────────────────────────────────────┤
 │  backtesting/                                       │
-│    backtest.py       ← event-driven engine (300k/s) │
+│    backtest.py           ← event-driven engine      │
 │    portfolio_backtest.py ← multi-asset engine       │
-│    allocation.py     ← equal/risk parity/corr-aware │
-│    vectorized.py     ← numpy engine (600k/s)        │
-│    broker.py         ← trade execution, gap stops   │
-│    portfolio.py      ← equity, drawdown, margin     │
-│    indicators.py     ← O(1) incremental + vectorized│
-│    statistics.py     ← bootstrap CI, DSR, perm test │
-│    data.py           ← OHLC validation (9 checks)   │
-│    plot.py           ← equity + drawdown charts     │
-│    strategy.py       ← abstract base class          │
-│    types.py          ← Bar, Trade dataclasses        │
+│    allocation.py         ← 4 allocation schemes     │
+│    vectorized.py         ← numpy engine             │
+│    broker.py             ← trade execution          │
+│    portfolio.py          ← equity, drawdown, margin │
+│    indicators.py         ← O(1) incremental + vec   │
+│    statistics.py         ← bootstrap, DSR, perm     │
+│    data.py               ← OHLC validation          │
+│    plot.py               ← equity + drawdown charts │
+│    strategy.py           ← abstract base class      │
+│    types.py              ← Bar, Trade dataclasses   │
 ├─────────────────────────────────────────────────────┤
-│  portfolio_optimizer.py ← multi-asset optimization  │
 │  utils.py  (data fetching, Sharpe ratio, etc.)      │
 │  config.py (env-based configuration)                │
 └─────────────────────────────────────────────────────┘
 ```
 
-**Data flow:** Strategies extend `Strategy` and implement `on_bar(i, bar, cash) -> Optional[Trade]`. The `Backtester` iterates over OHLC bars, delegates exit execution to the `Broker` (gap-aware stops, take-profits), asks the strategy for entry signals, and tracks equity via the `Portfolio`.
+**Data flow:** Strategies extend `Strategy` and implement `on_bar(i, bar, cash) -> Optional[Trade]`. The `Backtester` iterates over OHLC bars, delegates exit execution to the `Broker` (gap-aware stops, take-profits), asks the strategy for entry signals, and tracks equity via the `Portfolio`. The `PortfolioBacktester` extends this to multiple assets with shared cash, allocation weights, and cross-asset risk management.
 
 ## Included Strategies
 
@@ -72,6 +77,87 @@ All strategies share a common risk model:
 - **Drawdown-scaled sizing**: position size scales down linearly as drawdown deepens
 - **Circuit breaker**: halts all new entries when drawdown exceeds a threshold (default 15%)
 - **Cooldown**: minimum bars between trades to prevent overtrading
+
+## Multi-Asset Portfolio Backtesting
+
+![Portfolio Allocation Comparison](docs/portfolio_allocation.png)
+*8 instruments (XAUUSD, EURUSD, BTCUSD, SPX500, NDX100, GER40, GBPUSD, USOUSD) on D1 with mixed strategies per asset class.*
+
+The `PortfolioBacktester` runs multiple strategies on multiple assets with shared cash and risk management.
+
+### Allocation schemes
+
+| Scheme | Method | Description |
+|---|---|---|
+| `EqualWeightAllocator` | 1/N | Each asset gets equal capital allocation |
+| `RiskParityAllocator` | Inverse vol | Weight inversely by rolling volatility — equal risk contribution |
+| `CorrelationAwareAllocator` | Risk parity + corr | Reduce weight for correlated assets, increase for uncorrelated |
+| `RegimeAllocator` | Vol regime | Shift weight between trend and mean-reversion assets based on rolling volatility regime |
+
+### Usage
+
+```python
+from backtesting.portfolio_backtest import PortfolioBacktester
+from backtesting.allocation import RiskParityAllocator
+from strategies import TrendFollowingStrategy, MeanReversionStrategy
+
+pbt = PortfolioBacktester(
+    dataframes={"XAUUSD": df_gold, "EURUSD": df_eur, "BTCUSD": df_btc},
+    strategies={
+        "XAUUSD": TrendFollowingStrategy(),
+        "EURUSD": MeanReversionStrategy(),
+        "BTCUSD": TrendFollowingStrategy(),
+    },
+    allocator=RiskParityAllocator(),
+    starting_cash=100_000,
+    commission_bps=5.0,
+    slippage_bps=2.0,
+    rebalance_frequency=500,  # Recompute weights every 500 bars
+)
+
+result = pbt.run()
+# result.equity_curve        — combined portfolio equity (np.ndarray)
+# result.per_asset_equity    — per-asset P&L contribution
+# result.per_asset_trades    — trades grouped by symbol
+# result.allocation_history  — weight snapshots over time
+```
+
+Assets with different timestamps are automatically aligned (union + forward-fill). Strategies are only called on bars where real market data exists.
+
+### Regime-aware allocation
+
+The `RegimeAllocator` measures cross-asset rolling volatility percentiles to detect market regime, then shifts capital toward strategies that suit the current environment:
+
+```python
+from backtesting.allocation import RegimeAllocator
+
+allocator = RegimeAllocator(
+    trend_symbols={"XAUUSD", "BTCUSD", "SPX500"},    # Get more weight in high-vol
+    reversion_symbols={"EURUSD", "GBPUSD"},            # Get more weight in low-vol
+    vol_lookback=200,       # Short window for current vol
+    vol_history=5000,       # Long window for percentile baseline
+    vol_threshold_pct=50,   # Above = trending, below = ranging
+    regime_boost=2.0,       # Multiplier for favored group
+)
+```
+
+### Portfolio optimizer
+
+Optimizes per-asset strategy parameters (and optionally allocation weights) at the portfolio level:
+
+```python
+from portfolio_optimizer import StrategyConfig, portfolio_optimize, portfolio_walk_forward
+
+configs = {
+    "XAUUSD": StrategyConfig(TrendFollowingStrategy, {"fast_period": (10, 40), "slow_period": (30, 100)}),
+    "EURUSD": StrategyConfig(MeanReversionStrategy, {"bb_period": (10, 30), "rsi_period": (7, 21)}),
+}
+
+result = portfolio_optimize(configs, dataframes, n_trials=50, objective="sharpe")
+wf = portfolio_walk_forward(configs, dataframes, n_splits=3, n_trials=30)
+```
+
+See `examples/portfolio_demo.py` for a full end-to-end demo with 8 instruments.
 
 ## Setup
 
@@ -98,15 +184,20 @@ cp .env.example .env
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATALAKE_URL` | `http://127.0.0.1:8888` | OHLC data API endpoint |
+| `DATALAKE_URL` | `http://127.0.0.1:8008` | OHLC datalake API endpoint |
 | `LOCAL_API_URL` | `http://127.0.0.1:8001` | Backtesting API URL |
 | `LOCAL_API_PORT` | `8001` | Port for the FastAPI server |
 
 ### Quick Start
 
-Run the end-to-end demo (backtests all strategies, optimizes, validates, runs statistical tests):
+Single-asset demo (backtests all strategies, optimizes, validates, runs statistical tests):
 ```bash
 python examples/demo.py
+```
+
+Multi-asset portfolio demo (8 instruments, 4 allocation schemes, portfolio optimization, walk-forward):
+```bash
+python examples/portfolio_demo.py
 ```
 
 ### Running
@@ -138,6 +229,8 @@ The `Backtester` processes each bar in this order:
 4. **Entry execution** (via Broker) - with leverage/margin checks, slippage, commission
 5. **Portfolio update** - equity curve, drawdown tracking, margin call check
 
+The `PortfolioBacktester` extends this: exits for ALL assets are processed before any new entries, preventing cash race conditions across instruments.
+
 When both stop and take-profit are hit in the same bar, `execution_priority` determines which fires first (default: `"stop_first"` for conservative estimates).
 
 ## Data Validation
@@ -168,7 +261,7 @@ The engine expects OHLC data with these columns:
 | `low` | float | Low price |
 | `close` | float | Close price |
 
-Local CSV files are cached in `ohlc_data/` with the naming convention `{INSTRUMENT}_{TIMEFRAME}.csv`.
+Data is fetched from the datalake API with automatic cursor-based pagination and cached locally in `ohlc_data/` as `{INSTRUMENT}_{TIMEFRAME}.csv`.
 
 ## API Endpoints
 
@@ -357,13 +450,14 @@ At vectorized speed, 1,000 Optuna trials on 3,000 bars completes in ~5 seconds.
 
 ## Testing
 
-175 tests covering:
+180 tests covering:
 
 | Module | Tests | Coverage |
 |---|---|---|
 | `test_backtest.py` | 15 | Engine basics, trade execution, commission/slippage, gap-aware stops, drawdown |
 | `test_broker.py` | 13 | Open/close trades, stop/TP execution, gap fills, buying power, costs |
 | `test_portfolio.py` | 6 | Equity tracking, drawdown, margin call liquidation |
+| `test_portfolio_backtest.py` | 27 | Multi-asset backtester, allocation schemes, regime detection, portfolio optimizer |
 | `test_data_validation.py` | 18 | OHLC validation: all 9 checks, error vs warning severity |
 | `test_statistics.py` | 18 | Bootstrap CI, permutation test, Deflated Sharpe Ratio |
 | `test_strategies.py` | 22 | ABC, incremental indicators, vectorized indicators, risk sizing, signals |
@@ -373,71 +467,9 @@ At vectorized speed, 1,000 Optuna trials on 3,000 bars completes in ~5 seconds.
 | `test_utils.py` | 12 | Sharpe ratio, sanitize, timeframe normalization |
 | `test_types.py` | 5 | Bar and Trade dataclass creation |
 
-| `test_portfolio_backtest.py` | 22 | Allocation schemes, timestamp alignment, shared cash, portfolio optimizer |
-
 ```bash
-python -m pytest tests/ -v  # 175 tests in ~2.6s
+python -m pytest tests/ -v  # 180 tests in ~2.8s
 ```
-
-## Multi-Asset Portfolio Backtesting
-
-The `PortfolioBacktester` runs multiple strategies on multiple assets with shared cash and risk management.
-
-### Allocation schemes
-
-| Scheme | Method | Description |
-|---|---|---|
-| `EqualWeightAllocator` | 1/N | Each asset gets equal capital allocation |
-| `RiskParityAllocator` | Inverse vol | Weight inversely by rolling volatility — equal risk contribution |
-| `CorrelationAwareAllocator` | Risk parity + corr | Reduce weight for correlated assets, increase for uncorrelated |
-
-### Usage
-
-```python
-from backtesting.portfolio_backtest import PortfolioBacktester
-from backtesting.allocation import RiskParityAllocator
-from strategies import TrendFollowingStrategy
-
-pbt = PortfolioBacktester(
-    dataframes={"XAUUSD": df_gold, "EURUSD": df_eur, "BTCUSD": df_btc},
-    strategies={
-        "XAUUSD": TrendFollowingStrategy(),
-        "EURUSD": TrendFollowingStrategy(),
-        "BTCUSD": TrendFollowingStrategy(),
-    },
-    allocator=RiskParityAllocator(),
-    starting_cash=100_000,
-    commission_bps=5.0,
-    slippage_bps=2.0,
-    rebalance_frequency=500,  # Recompute weights every 500 bars
-)
-
-result = pbt.run()
-# result.equity_curve        — combined portfolio equity (np.ndarray)
-# result.per_asset_equity    — per-asset P&L contribution
-# result.per_asset_trades    — trades grouped by symbol
-# result.allocation_history  — weight snapshots over time
-```
-
-Assets with different timestamps are automatically aligned (union + forward-fill). Strategies are only called on real bars.
-
-### Portfolio optimizer
-
-Optimizes per-asset strategy parameters (and optionally allocation weights) at the portfolio level:
-
-```python
-from portfolio_optimizer import StrategyConfig, portfolio_optimize, portfolio_walk_forward
-
-configs = {
-    "XAUUSD": StrategyConfig(TrendFollowingStrategy, {"fast_period": (10, 40), "slow_period": (30, 100)}),
-    "EURUSD": StrategyConfig(TrendFollowingStrategy, {"fast_period": (10, 40), "slow_period": (30, 100)}),
-}
-
-result = portfolio_optimize(configs, dataframes, n_trials=50, objective="sharpe")
-wf = portfolio_walk_forward(configs, dataframes, n_splits=3, n_trials=30)
-```
-
-See `examples/portfolio_demo.py` for a full end-to-end demo with 8 instruments.
 
 ## Known Limitations
 

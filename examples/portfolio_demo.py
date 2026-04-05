@@ -28,6 +28,7 @@ from backtesting.allocation import (
     RiskParityAllocator,
 )
 from backtesting.backtest import Backtester
+from backtesting.plot import plot_portfolio
 from backtesting.portfolio_backtest import PortfolioBacktester
 from portfolio_optimizer import StrategyConfig, portfolio_optimize, portfolio_walk_forward
 from strategies import (
@@ -163,6 +164,8 @@ def main():
           f"{'Trades':>7s}")
     print("-" * 52)
 
+    portfolio_results = {}  # For charting
+
     for alloc_name, allocator in allocators.items():
         strats = {}
         for sym in symbols:
@@ -180,6 +183,7 @@ def main():
             vol_lookback=500,
         )
         result = pbt.run()
+        portfolio_results[alloc_name] = result
 
         ret = (result.equity_curve[-1] - STARTING_CASH) / STARTING_CASH * 100
         sharpe = compute_sharpe(result.equity_curve)
@@ -192,6 +196,15 @@ def main():
             top = sorted(last_w.items(), key=lambda x: x[1], reverse=True)
             weights_str = "  ".join(f"{s}: {w:.1%}" for s, w in top)
             print(f"  Weights: {weights_str}")
+
+    # Save allocation comparison chart
+    os.makedirs("docs", exist_ok=True)
+    plot_portfolio(
+        portfolio_results,
+        starting_cash=STARTING_CASH,
+        save_path="docs/portfolio_allocation.png",
+        show=False,
+    )
 
     opt_symbols = symbols
     opt_dfs = dataframes
