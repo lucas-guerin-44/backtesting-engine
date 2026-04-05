@@ -5,6 +5,7 @@
 An event-driven and vectorized backtesting engine for evaluating trading strategies on historical OHLC data. Built with Python, FastAPI, and Streamlit.
 
 ![Strategy Comparison](docs/strategy_comparison.png)
+*Equity curves for all four strategies on XAUUSD H1 with 5bps commission and 2bps slippage.*
 
 ## What This Does
 
