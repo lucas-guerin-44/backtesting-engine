@@ -4,6 +4,8 @@
 
 An event-driven and vectorized backtesting engine for evaluating trading strategies on historical OHLC data. Built with Python, FastAPI, and Streamlit.
 
+![Strategy Comparison](docs/strategy_comparison.png)
+
 ## What This Does
 
 This engine lets you define trading strategies as Python classes, run them against historical price data, and analyze the results through either:
@@ -16,29 +18,38 @@ The engine simulates realistic execution including:
 - **Configurable slippage and commission** (basis-point level)
 - **Leverage and margin** with automatic margin-call liquidation
 - **Drawdown tracking** (peak-to-trough)
+- **OHLC data validation** (9 checks for data quality before backtesting)
+- **Statistical significance testing** (bootstrap CI, permutation test, Deflated Sharpe Ratio)
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│  frontend.py (Streamlit Dashboard)              │
-│  api.py      (FastAPI REST API)                 │
-├─────────────────────────────────────────────────┤
-│  strategy_registry.py                           │
-│  strategies.py (8 strategy implementations)     │
-├─────────────────────────────────────────────────┤
-│  backtesting/                                   │
-│    backtest.py   ← orchestration loop           │
-│    broker.py     ← trade execution (fills,      │
-│                     gap-aware stops, leverage)   │
-│    portfolio.py  ← equity curve, drawdown,      │
-│                     margin call liquidation      │
-│    strategy.py   ← abstract base class          │
-│    types.py      ← Bar, Trade dataclasses       │
-├─────────────────────────────────────────────────┤
-│  utils.py  (data fetching, Sharpe ratio, etc.)  │
-│  config.py (env-based configuration)            │
-└─────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│  frontend.py (Streamlit Dashboard)                  │
+│  api.py      (FastAPI REST API)                     │
+│  examples/demo.py (end-to-end demo)                 │
+├─────────────────────────────────────────────────────┤
+│  optimizer.py    ← Bayesian search + walk-forward   │
+│  results_db.py   ← SQLite results persistence       │
+├─────────────────────────────────────────────────────┤
+│  strategy_registry.py                               │
+│  strategies.py (4 strategy implementations)         │
+├─────────────────────────────────────────────────────┤
+│  backtesting/                                       │
+│    backtest.py       ← event-driven engine (300k/s) │
+│    vectorized.py     ← numpy engine (600k/s)        │
+│    broker.py         ← trade execution, gap stops   │
+│    portfolio.py      ← equity, drawdown, margin     │
+│    indicators.py     ← O(1) incremental + vectorized│
+│    statistics.py     ← bootstrap CI, DSR, perm test │
+│    data.py           ← OHLC validation (9 checks)   │
+│    plot.py           ← equity + drawdown charts     │
+│    strategy.py       ← abstract base class          │
+│    types.py          ← Bar, Trade dataclasses        │
+├─────────────────────────────────────────────────────┤
+│  utils.py  (data fetching, Sharpe ratio, etc.)      │
+│  config.py (env-based configuration)                │
+└─────────────────────────────────────────────────────┘
 ```
 
 **Data flow:** Strategies extend `Strategy` and implement `on_bar(i, bar, cash) -> Optional[Trade]`. The `Backtester` iterates over OHLC bars, delegates exit execution to the `Broker` (gap-aware stops, take-profits), asks the strategy for entry signals, and tracks equity via the `Portfolio`.
@@ -89,7 +100,7 @@ cp .env.example .env
 
 ### Quick Start
 
-Run the end-to-end demo (backtests all strategies, optimizes, walk-forward validates):
+Run the end-to-end demo (backtests all strategies, optimizes, validates, runs statistical tests):
 ```bash
 python examples/demo.py
 ```
@@ -124,6 +135,22 @@ The `Backtester` processes each bar in this order:
 5. **Portfolio update** - equity curve, drawdown tracking, margin call check
 
 When both stop and take-profit are hit in the same bar, `execution_priority` determines which fires first (default: `"stop_first"` for conservative estimates).
+
+## Data Validation
+
+All data is validated before backtesting via `validate_ohlc()`:
+
+| Check | Severity | What it catches |
+|---|---|---|
+| Required columns | ERROR | Missing open/high/low/close |
+| Numeric types | ERROR | String or object columns in OHLC |
+| NaN / Inf | ERROR | Missing or infinite values |
+| OHLC consistency | ERROR | high < low, high < close, etc. |
+| Duplicate timestamps | ERROR | Same timestamp appearing twice |
+| Monotonic timestamps | ERROR | Out-of-order bars |
+| Missing bars | WARNING | Gaps in expected frequency |
+| Zero/negative prices | WARNING | Suspicious price values |
+| Extreme moves | WARNING | >50% single-bar moves |
 
 ## Data Format
 
@@ -175,7 +202,7 @@ Register it in `strategy_registry.py` to make it available in the API and dashbo
 
 ## Parameter Optimizer
 
-`optimizer.py` provides Bayesian parameter search (Optuna TPE) with walk-forward validation.
+`optimizer.py` provides Bayesian parameter search (Optuna TPE) with walk-forward validation and parallel execution.
 
 ### How it works
 
@@ -211,6 +238,7 @@ result = optimize(
     df=df,
     n_trials=100,
     objective="sharpe",            # or "return", "calmar", "sortino"
+    n_jobs=-1,                     # parallel trials (all CPU cores)
     commission_bps=5.0,
     slippage_bps=2.0,
 )
@@ -240,6 +268,7 @@ wf = walk_forward(
     train_ratio=0.7,    # 70% train, 30% test per window
     n_trials=50,        # Optuna trials per training window
     objective="sharpe",
+    n_jobs=-1,           # parallel within each split
 )
 
 print(wf.summary)               # DataFrame with IS/OOS scores per split
@@ -248,18 +277,53 @@ print(wf.out_of_sample_mean)    # Average out-of-sample Sharpe (the real number)
 print(wf.degradation)           # IS - OOS (high = overfitting)
 ```
 
-### Performance
+## Statistical Significance
 
-Two execution tiers, both pure Python (no C extensions):
+Three tests to determine if backtest results are real or noise:
 
-| Engine | Throughput | Use case |
+| Test | Question | Method |
 |---|---|---|
-| Event-driven (`Backtester`) | ~300,000 bars/sec | Any strategy, complex state allowed |
-| Vectorized (`VectorizedBacktester`) | ~600,000 bars/sec | Array-expressible strategies (all 4 included) |
+| **Bootstrap CI** | "Is the Sharpe statistically different from zero?" | Resample returns 10k times, report 95% confidence interval |
+| **Permutation test** | "Could random trades have produced this Sharpe?" | Shuffle trade PnLs, build null distribution, report p-value |
+| **Deflated Sharpe** | "Is this Sharpe still significant after testing N param combos?" | Bailey & Lopez de Prado (2014) correction for multiple testing |
 
-At vectorized speed, 1,000 Optuna trials on 3,000 bars completes in ~5 seconds.
+```python
+from backtesting.statistics import compute_statistical_report
+
+report = compute_statistical_report(equity_curve, trades, n_trials_tested=50)
+print(report)
+# Bootstrap CI:     Sharpe: 0.42  CI [0.08, 0.79] (95%) — SIGNIFICANT
+# Permutation test: Sharpe: 0.42  p-value: 0.012  percentile: 98.8th — SIGNIFICANT
+# Deflated Sharpe:  Observed SR: 0.42  Deflated SR: 0.18  (p=0.04, 50 trials) — SURVIVES deflation
+```
+
+## Results Database
+
+SQLite-backed persistence for backtest runs and optimization results.
+
+```python
+from results_db import ResultsDB
+
+with ResultsDB("results.db") as db:
+    # Save a backtest run
+    run_id = db.save_run("TrendFollowing", params, equity_curve, trades)
+
+    # Query stored runs
+    df = db.query_runs(min_sharpe=0.3, strategy="TrendFollowing")
+
+    # Save walk-forward results
+    db.save_walk_forward(wf_result, "TrendFollowing")
+```
+
+CLI access:
+```bash
+python -m results_db query --min-sharpe 0.3 --strategy "Trend Following"
+python -m results_db get 42
+```
 
 ## Visualization
+
+![Backtest Example](docs/backtest_example.png)
 
 ```python
 from backtesting.plot import plot_backtest, plot_strategy_comparison
@@ -276,23 +340,37 @@ plot_strategy_comparison({
 }, save_path="comparison.png")
 ```
 
+## Performance
+
+Two execution tiers, both pure Python (no C extensions):
+
+| Engine | Throughput | Use case |
+|---|---|---|
+| Event-driven (`Backtester`) | ~300,000 bars/sec | Any strategy, complex inter-bar state allowed |
+| Vectorized (`VectorizedBacktester`) | ~600,000 bars/sec | Array-expressible strategies (all 4 included) |
+
+At vectorized speed, 1,000 Optuna trials on 3,000 bars completes in ~5 seconds.
+
 ## Testing
 
-98 tests covering:
+153 tests covering:
 
 | Module | Tests | Coverage |
 |---|---|---|
 | `test_backtest.py` | 15 | Engine basics, trade execution, commission/slippage, gap-aware stops, drawdown |
 | `test_broker.py` | 13 | Open/close trades, stop/TP execution, gap fills, buying power, costs |
 | `test_portfolio.py` | 6 | Equity tracking, drawdown, margin call liquidation |
+| `test_data_validation.py` | 18 | OHLC validation: all 9 checks, error vs warning severity |
+| `test_statistics.py` | 18 | Bootstrap CI, permutation test, Deflated Sharpe Ratio |
 | `test_strategies.py` | 22 | ABC, incremental indicators, vectorized indicators, risk sizing, signals |
-| `test_optimizer.py` | 8 | Single-period search, walk-forward validation, objective functions |
+| `test_optimizer.py` | 12 | Single-period, walk-forward, parallel execution, objective functions |
+| `test_results_db.py` | 15 | CRUD, query filtering, walk-forward splits, cascade delete |
 | `test_vectorized.py` | 13 | Vectorized backtester, signal generators, gap-aware stops |
 | `test_utils.py` | 12 | Sharpe ratio, sanitize, timeframe normalization |
 | `test_types.py` | 5 | Bar and Trade dataclass creation |
 
 ```bash
-python -m pytest tests/ -v  # ~0.5s
+python -m pytest tests/ -v  # 153 tests in ~2.7s
 ```
 
 ## Known Limitations
