@@ -54,6 +54,16 @@ class RiskLimits:
 
 
 @dataclass
+class SkippedTrade:
+    """Record of a trade that was blocked before execution."""
+    bar_idx: int
+    symbol: str
+    side: int
+    size: float
+    reason: str  # "gross_exposure", "net_exposure", "single_asset", "max_positions", "buying_power"
+
+
+@dataclass
 class PortfolioBacktestResult:
     """Result from a multi-asset portfolio backtest."""
     equity_curve: np.ndarray
@@ -62,6 +72,7 @@ class PortfolioBacktestResult:
     per_asset_trades: Dict[str, List[Trade]]
     timestamps: List[pd.Timestamp]
     allocation_history: List[Dict[str, float]]
+    skipped_trades: List[SkippedTrade]
 
 
 class PortfolioBacktester:
@@ -217,6 +228,7 @@ class PortfolioBacktester:
         }
         allocation_history: List[Dict[str, float]] = []
         per_asset_trades: Dict[str, List[Trade]] = {sym: [] for sym in symbols}
+        skipped_trades: List[SkippedTrade] = []
         closed_count = 0  # Track broker.closed_trades length to detect new closures
         # Pending trades: signal on bar i, execute on bar i+1 at open
         pending_trades: Dict[str, Trade] = {}
@@ -267,16 +279,20 @@ class PortfolioBacktester:
 
                 # Re-check risk limits at execution time
                 if risk_limits is not None:
-                    # Compute current equity for the check
                     _cash = portfolio.cash
                     _pnl = 0.0
                     for s2 in symbols:
                         for tr in positions.get(s2, []):
                             _pnl += (c[s2][i] - tr.entry_price) * tr.side * tr.size
                     _eq = _cash + _pnl
-                    if not self._check_risk_limits(
+                    reason = self._check_risk_limits(
                         risk_limits, sym, pt, positions, c, i, symbols, _eq,
-                    ):
+                    )
+                    if reason is not None:
+                        skipped_trades.append(SkippedTrade(
+                            bar_idx=i, symbol=sym, side=pt.side,
+                            size=pt.size, reason=reason,
+                        ))
                         continue
 
                 broker.open_trade(
@@ -375,6 +391,7 @@ class PortfolioBacktester:
             per_asset_trades=per_asset_trades,
             timestamps=ts,
             allocation_history=allocation_history,
+            skipped_trades=skipped_trades,
         )
 
     @staticmethod
@@ -387,13 +404,13 @@ class PortfolioBacktester:
         bar_idx: int,
         symbols: List[str],
         equity: float,
-    ) -> bool:
+    ) -> Optional[str]:
         """Check if a proposed trade would violate portfolio risk limits.
 
-        Returns True if the trade is allowed, False if it should be skipped.
+        Returns None if the trade is allowed, or a reason string if blocked.
         """
         if equity <= 0:
-            return False
+            return "zero_equity"
 
         new_notional = abs(trade.entry_price * trade.size)
 
@@ -421,22 +438,18 @@ class PortfolioBacktester:
         projected_net = net_exposure + trade.entry_price * trade.size * trade.side
         projected_asset = asset_notional.get(symbol, 0.0) + new_notional
 
-        # Check: max gross exposure
         if projected_gross / equity > limits.max_gross_exposure:
-            return False
+            return "gross_exposure"
 
-        # Check: max net exposure
         if abs(projected_net) / equity > limits.max_net_exposure:
-            return False
+            return "net_exposure"
 
-        # Check: max single asset concentration
         if projected_asset / equity > limits.max_single_asset:
-            return False
+            return "single_asset"
 
-        # Check: max open positions (count of assets with positions)
         if limits.max_open_positions > 0:
             will_open_new = asset_notional.get(symbol, 0.0) == 0.0
             if will_open_new and n_assets_with_positions >= limits.max_open_positions:
-                return False
+                return "max_positions"
 
-        return True
+        return None

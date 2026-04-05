@@ -134,10 +134,10 @@ def compute_sharpe(equity_curve, risk_free: float = 0.0, annualize: bool = True,
     returns = np.diff(equity_curve)[valid_idx] / equity_curve[:-1][valid_idx]
     excess_returns = returns - risk_free / freq_per_year
 
-    if np.std(excess_returns) == 0:
+    if np.std(excess_returns, ddof=1) == 0:
         return 0.0
 
-    sharpe = np.mean(excess_returns) / np.std(excess_returns)
+    sharpe = np.mean(excess_returns) / np.std(excess_returns, ddof=1)
     if annualize:
         sharpe *= np.sqrt(freq_per_year)
 

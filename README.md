@@ -493,11 +493,6 @@ python -m pytest tests/ -v  # 192 tests in ~2.7s
 
 ## Known Limitations
 
-- **No volume data** used in execution simulation (fills are assumed regardless of volume).
-- **Bar-level resolution** means intra-bar price path is unknown; execution priority resolves ambiguous bars.
-- **No survivorship bias handling.** The engine backtests whatever symbols you give it. There's no mechanism for delisted assets, universe selection bias, or point-in-time constituent data — that's a data pipeline concern, not an engine concern.
-- **No funding costs / carry.** For leveraged positions or multi-day holds, there's no overnight funding simulation. The margin system handles buying power but not the cost of capital.
-- **No trailing stops.** All stops are fixed at entry. The Broker supports `update_stop()` but no strategy uses it yet.
-- **No calendar awareness.** All bars are treated as equal — no concept of weekends, holidays, roll dates, or trading sessions.
-- **No event log for skipped trades.** When a trade is blocked by risk limits or buying power, it's silently dropped. No audit trail for debugging "why didn't my strategy trade here?"
-- **Vectorized backtester is semi-vectorized.** The exit search and equity curve are numpy-vectorized, but trade chaining is sequential (one trade at a time). This is by design — trades are path-dependent.
+- **Flat slippage model.** Fixed basis-point cost regardless of order size or liquidity. A production system would use a market impact model.
+- **No funding costs.** No overnight financing simulation for leveraged or multi-day positions.
+- **No calendar awareness.** All bars are treated as equal -- no weekends, holidays, or trading sessions.

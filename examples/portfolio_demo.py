@@ -223,6 +223,11 @@ def main():
             top = sorted(last_w.items(), key=lambda x: x[1], reverse=True)
             weights_str = "  ".join(f"{s}: {w:.1%}" for s, w in top)
             print(f"  Weights: {weights_str}")
+        if result.skipped_trades:
+            from collections import Counter
+            reasons = Counter(s.reason for s in result.skipped_trades)
+            reasons_str = ", ".join(f"{r}: {n}" for r, n in reasons.most_common())
+            print(f"  Skipped: {len(result.skipped_trades)} trades ({reasons_str})")
 
     # Save allocation comparison chart
     os.makedirs("docs", exist_ok=True)
