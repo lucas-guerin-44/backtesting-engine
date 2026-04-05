@@ -167,6 +167,7 @@ def optimize(
     slippage_bps: float = 2.0,
     symbol: str = "default",
     fixed_params: Optional[Dict[str, Any]] = None,
+    n_jobs: int = 1,
 ) -> OptimizationResult:
     """Optimize strategy parameters using Bayesian search (Optuna TPE).
 
@@ -223,7 +224,7 @@ def optimize(
             return -999.0
 
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler())
-    study.optimize(_objective, n_trials=n_trials)
+    study.optimize(_objective, n_trials=n_trials, n_jobs=n_jobs)
 
     # Build trials DataFrame
     rows = []
@@ -255,6 +256,7 @@ def walk_forward(
     slippage_bps: float = 2.0,
     symbol: str = "default",
     fixed_params: Optional[Dict[str, Any]] = None,
+    n_jobs: int = 1,
 ) -> WalkForwardResult:
     """Walk-forward optimization: the only honest way to evaluate parameter tuning.
 
@@ -330,7 +332,7 @@ def walk_forward(
             strategy_cls=strategy_cls, param_space=param_space, df=train_df,
             n_trials=n_trials, objective=objective, starting_cash=starting_cash,
             commission_bps=commission_bps, slippage_bps=slippage_bps,
-            symbol=symbol, fixed_params=fixed_params,
+            symbol=symbol, fixed_params=fixed_params, n_jobs=n_jobs,
         )
 
         # 2. Evaluate best params on test data (out-of-sample)

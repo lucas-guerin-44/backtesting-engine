@@ -148,7 +148,44 @@ def main():
         print("Verdict: Negative OOS Sharpe — no reliable edge detected.")
 
     # ------------------------------------------------------------------
-    section("4. Performance: Event-Driven vs Vectorized")
+    section("4. Statistical Significance")
+    # ------------------------------------------------------------------
+
+    from backtesting.statistics import compute_statistical_report
+
+    # Run the best strategy and check if the edge is real
+    bt = Backtester(df, TrendFollowingStrategy(), starting_cash=10_000,
+                    commission_bps=5.0, slippage_bps=2.0, symbol="XAUUSD")
+    eq, trades = bt.run()
+
+    report = compute_statistical_report(eq, trades, n_trials_tested=50, seed=42)
+    print(report)
+
+    # ------------------------------------------------------------------
+    section("5. Results Database")
+    # ------------------------------------------------------------------
+
+    from results_db import ResultsDB
+
+    db_path = "exports/demo_results.db"
+    os.makedirs("exports", exist_ok=True)
+    with ResultsDB(db_path) as db:
+        for name, strat_cls in [("Trend Following", TrendFollowingStrategy),
+                                ("Momentum", MomentumStrategy)]:
+            strat = strat_cls()
+            bt = Backtester(df, strat, starting_cash=10_000,
+                            commission_bps=5.0, slippage_bps=2.0)
+            eq, trades = bt.run()
+            db.save_run(name, {}, eq, trades, starting_cash=10_000,
+                        commission_bps=5.0, slippage_bps=2.0)
+
+        print(f"Saved runs to {db_path}")
+        print()
+        print("Query: all runs ordered by Sharpe:")
+        print(db.query_runs()[["strategy_name", "sharpe", "pct_return", "max_drawdown", "total_trades"]].to_string(index=False))
+
+    # ------------------------------------------------------------------
+    section("6. Performance: Event-Driven vs Vectorized")
     # ------------------------------------------------------------------
 
     o = df["open"].to_numpy(dtype=np.float64)

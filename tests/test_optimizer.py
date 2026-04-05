@@ -100,3 +100,37 @@ class TestWalkForward:
         with pytest.raises(ValueError, match="Not enough data"):
             walk_forward(TrendFollowingStrategy, PARAM_SPACE, tiny_df,
                          n_splits=5, n_trials=1)
+
+
+class TestParallelOptimize:
+    def test_parallel_produces_valid_result(self, long_trending_df):
+        result = optimize(
+            TrendFollowingStrategy, PARAM_SPACE, long_trending_df,
+            n_trials=6, objective="sharpe", n_jobs=2,
+        )
+        assert isinstance(result, OptimizationResult)
+        assert result.best_params is not None
+        assert len(result.all_trials) == 6
+
+    def test_n_jobs_minus_one(self, long_trending_df):
+        result = optimize(
+            TrendFollowingStrategy, PARAM_SPACE, long_trending_df,
+            n_trials=4, objective="sharpe", n_jobs=-1,
+        )
+        assert isinstance(result, OptimizationResult)
+
+    def test_parallel_walk_forward(self, long_trending_df):
+        result = walk_forward(
+            TrendFollowingStrategy, PARAM_SPACE, long_trending_df,
+            n_splits=2, n_trials=3, objective="sharpe", n_jobs=2,
+        )
+        assert isinstance(result, WalkForwardResult)
+        assert len(result.splits) == 2
+
+    def test_parallel_params_within_bounds(self, long_trending_df):
+        result = optimize(
+            TrendFollowingStrategy, PARAM_SPACE, long_trending_df,
+            n_trials=6, objective="sharpe", n_jobs=2,
+        )
+        assert 5 <= result.best_params["fast_period"] <= 30
+        assert 20 <= result.best_params["slow_period"] <= 60

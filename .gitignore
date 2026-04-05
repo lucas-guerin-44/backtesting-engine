@@ -16,6 +16,7 @@ venv/
 # IDE
 .vscode/
 .idea/
+.claude/
 
 # Testing
 .pytest_cache/
@@ -27,6 +28,7 @@ nul
 
 # Project artifacts
 exports/
+results.db
 ohlc_data/
 artifacts/
 trade_charts/

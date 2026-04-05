@@ -17,6 +17,7 @@ from typing import List, Tuple
 import numpy as np
 import pandas as pd
 
+from backtesting.data import validate_ohlc
 from backtesting.portfolio import Portfolio
 from backtesting.types import Bar, Trade
 
@@ -64,6 +65,10 @@ class Backtester:
             margin_rate=margin_rate,
         )
         self.broker = self.portfolio.broker
+
+        # Validate data before proceeding
+        report = validate_ohlc(df)
+        report.raise_if_invalid()
 
         # Pre-extract numpy arrays for fast bar construction
         self._open = df["open"].to_numpy(dtype=np.float64)
