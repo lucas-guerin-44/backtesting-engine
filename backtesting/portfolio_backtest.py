@@ -54,13 +54,21 @@ class RiskLimits:
 
 
 @dataclass
-class SkippedTrade:
-    """Record of a trade that was blocked before execution."""
+class AuditEvent:
+    """Structured record of a portfolio-level decision for replay and debugging.
+
+    Every signal, fill, skip, and exit is logged so the full decision history
+    can be reconstructed from the audit trail alone.
+    """
     bar_idx: int
+    timestamp: object  # pd.Timestamp
     symbol: str
-    side: int
-    size: float
-    reason: str  # "gross_exposure", "net_exposure", "single_asset", "max_positions", "buying_power"
+    event: str  # "signal", "fill", "skip", "exit_stop", "exit_tp"
+    side: int = 0
+    size: float = 0.0
+    price: float = 0.0
+    reason: str = ""  # For "skip": "gross_exposure", "buying_power", etc.
+    equity: float = 0.0
 
 
 @dataclass
@@ -72,7 +80,7 @@ class PortfolioBacktestResult:
     per_asset_trades: Dict[str, List[Trade]]
     timestamps: List[pd.Timestamp]
     allocation_history: List[Dict[str, float]]
-    skipped_trades: List[SkippedTrade]
+    audit_log: List[AuditEvent]
 
 
 class PortfolioBacktester:
@@ -89,9 +97,10 @@ class PortfolioBacktester:
     starting_cash : float
         Initial portfolio cash.
     commission_bps : float
-        Commission in basis points per trade.
+        Default commission in basis points per trade. Can be overridden
+        per asset via ``costs_by_symbol``.
     slippage_bps : float
-        Slippage in basis points.
+        Default slippage in basis points. Can be overridden per asset.
     max_leverage : float
         Maximum gross leverage.
     margin_rate : float
@@ -100,6 +109,11 @@ class PortfolioBacktester:
         Recompute allocation weights every N bars. 0 = compute once at start.
     vol_lookback : int
         Lookback window for volatility/correlation estimation in allocators.
+    costs_by_symbol : dict, optional
+        Per-asset transaction cost overrides. Keys are symbol names, values
+        are dicts with ``"commission_bps"`` and/or ``"slippage_bps"``.
+        Assets not listed use the default ``commission_bps``/``slippage_bps``.
+        Example: ``{"BTCUSD": {"commission_bps": 10, "slippage_bps": 5}}``
     """
 
     def __init__(
@@ -115,6 +129,7 @@ class PortfolioBacktester:
         rebalance_frequency: int = 0,
         vol_lookback: int = 60,
         risk_limits: Optional[RiskLimits] = None,
+        costs_by_symbol: Optional[Dict[str, Dict[str, float]]] = None,
     ):
         if set(dataframes.keys()) != set(strategies.keys()):
             raise ValueError("dataframes and strategies must have the same keys")
@@ -124,6 +139,15 @@ class PortfolioBacktester:
         self.symbols = sorted(dataframes.keys())
         self.strategies = strategies
         self.allocator = allocator or EqualWeightAllocator()
+
+        # Build per-asset cost table
+        self._costs: Dict[str, Dict[str, float]] = {}
+        for sym in self.symbols:
+            overrides = (costs_by_symbol or {}).get(sym, {})
+            self._costs[sym] = {
+                "commission_bps": overrides.get("commission_bps", commission_bps),
+                "slippage_bps": overrides.get("slippage_bps", slippage_bps),
+            }
         self.starting_cash = starting_cash
         self.rebalance_frequency = rebalance_frequency
         self.vol_lookback = vol_lookback
@@ -228,7 +252,7 @@ class PortfolioBacktester:
         }
         allocation_history: List[Dict[str, float]] = []
         per_asset_trades: Dict[str, List[Trade]] = {sym: [] for sym in symbols}
-        skipped_trades: List[SkippedTrade] = []
+        audit_log: List[AuditEvent] = []
         closed_count = 0  # Track broker.closed_trades length to detect new closures
         # Pending trades: signal on bar i, execute on bar i+1 at open
         pending_trades: Dict[str, Trade] = {}
@@ -260,14 +284,25 @@ class PortfolioBacktester:
             for sym in symbols:
                 open_pos = positions.get(sym)
                 if open_pos and len(open_pos) > 0 and is_real[sym][i]:
+                    # Apply per-asset costs for exit fills
+                    sym_costs = self._costs[sym]
+                    portfolio.commission_bps = sym_costs["commission_bps"]
+                    portfolio.slippage_bps = sym_costs["slippage_bps"]
+
                     bar = Bar(ts[i], o[sym][i], h[sym][i], lo[sym][i], c[sym][i])
                     exit_first(sym, bar)
                     exit_second(sym, bar)
-                    # Attribute newly closed trades to this symbol
+                    # Attribute newly closed trades to this symbol and log exits
                     new_closed = len(broker.closed_trades) - closed_count
                     for j in range(new_closed):
-                        per_asset_trades[sym].append(
-                            broker.closed_trades[closed_count + j])
+                        closed_trade = broker.closed_trades[closed_count + j]
+                        per_asset_trades[sym].append(closed_trade)
+                        audit_log.append(AuditEvent(
+                            bar_idx=i, timestamp=ts[i], symbol=sym,
+                            event="exit", side=closed_trade.side,
+                            size=closed_trade.size,
+                            price=closed_trade.exit_price or 0.0,
+                        ))
                     closed_count += new_closed
 
             # PHASE 2: Execute pending trades at this bar's open (only on real bars)
@@ -289,18 +324,44 @@ class PortfolioBacktester:
                         risk_limits, sym, pt, positions, c, i, symbols, _eq,
                     )
                     if reason is not None:
-                        skipped_trades.append(SkippedTrade(
-                            bar_idx=i, symbol=sym, side=pt.side,
-                            size=pt.size, reason=reason,
+                        audit_log.append(AuditEvent(
+                            bar_idx=i, timestamp=ts[i], symbol=sym,
+                            event="skip", side=pt.side, size=pt.size,
+                            price=pt.entry_price, reason=reason, equity=_eq,
                         ))
                         continue
 
+                # Apply per-asset transaction costs
+                sym_costs = self._costs[sym]
+                portfolio.commission_bps = sym_costs["commission_bps"]
+                portfolio.slippage_bps = sym_costs["slippage_bps"]
+
+                # Pass all current prices for accurate multi-asset buying power
+                all_prices = {s: c[s][i] for s in symbols}
+                pos_before = len(positions.get(sym, []))
                 broker.open_trade(
                     symbol=sym, bar=bar,
                     side=pt.side, size=pt.size,
                     stop=pt.stop_price, take_profit=pt.take_profit,
-                    entry_price=None,  # Fills at bar.open (next-bar-open execution)
+                    entry_price=None,
+                    current_prices=all_prices,
                 )
+                pos_after = len(positions.get(sym, []))
+                if pos_after > pos_before:
+                    # Trade was accepted by broker
+                    fill_price = positions[sym][-1].entry_price
+                    audit_log.append(AuditEvent(
+                        bar_idx=i, timestamp=ts[i], symbol=sym,
+                        event="fill", side=pt.side, size=pt.size,
+                        price=fill_price, equity=portfolio.cash,
+                    ))
+                else:
+                    # Broker rejected (buying power, margin, etc.)
+                    audit_log.append(AuditEvent(
+                        bar_idx=i, timestamp=ts[i], symbol=sym,
+                        event="skip", side=pt.side, size=pt.size,
+                        price=pt.entry_price, reason="buying_power",
+                    ))
 
             # Sync cash after all exits and entries
             cash = portfolio.cash
@@ -313,12 +374,17 @@ class PortfolioBacktester:
                 current_weights = weights.weights
                 allocation_history.append(dict(current_weights))
 
-            # PHASE 4: Compute portfolio equity for risk limits
-            open_pnl_total = 0.0
+            # PHASE 4: Compute per-asset P&L and portfolio equity (single pass)
+            open_pnl = 0.0
+            per_asset_pnl: Dict[str, float] = {}
             for sym in symbols:
+                sym_pnl = 0.0
                 for tr in positions.get(sym, []):
-                    open_pnl_total += (c[sym][i] - tr.entry_price) * tr.side * tr.size
-            portfolio_equity = cash + open_pnl_total
+                    sym_pnl += (c[sym][i] - tr.entry_price) * tr.side * tr.size
+                per_asset_pnl[sym] = sym_pnl
+                per_asset_equity[sym][i] = sym_pnl
+                open_pnl += sym_pnl
+            portfolio_equity = cash + open_pnl
 
             # PHASE 5: Call each strategy on its real bars
             # Signals are stored as pending — execute on next bar's open.
@@ -330,28 +396,21 @@ class PortfolioBacktester:
                     continue
 
                 bar = Bar(ts[i], o[sym][i], h[sym][i], lo[sym][i], c[sym][i])
-                sym_pnl = 0.0
-                for tr in positions.get(sym, []):
-                    sym_pnl += (c[sym][i] - tr.entry_price) * tr.side * tr.size
-                asset_equity = cash * current_weights.get(sym, 0.0) + sym_pnl
+                asset_equity = cash * current_weights.get(sym, 0.0) + per_asset_pnl[sym]
 
                 li = local_idx[sym][i]
                 new_trade = strats[sym](li, bar, asset_equity)
 
                 if new_trade is not None and new_trade.size > 0:
                     pending_trades[sym] = new_trade
+                    audit_log.append(AuditEvent(
+                        bar_idx=i, timestamp=ts[i], symbol=sym,
+                        event="signal", side=new_trade.side,
+                        size=new_trade.size, price=new_trade.entry_price,
+                        equity=asset_equity,
+                    ))
 
-            # PHASE 5: Compute portfolio equity
-            current_prices = {sym: c[sym][i] for sym in symbols}
-            open_pnl = 0.0
-            for sym in symbols:
-                sym_pnl = 0.0
-                for tr in positions.get(sym, []):
-                    sym_pnl += (c[sym][i] - tr.entry_price) * tr.side * tr.size
-                per_asset_equity[sym][i] = sym_pnl
-                open_pnl += sym_pnl
-
-            equity = cash + open_pnl
+            equity = portfolio_equity
             equity_curve[i] = max(equity, 0.0)
 
             # Update drawdown tracking
@@ -391,7 +450,7 @@ class PortfolioBacktester:
             per_asset_trades=per_asset_trades,
             timestamps=ts,
             allocation_history=allocation_history,
-            skipped_trades=skipped_trades,
+            audit_log=audit_log,
         )
 
     @staticmethod

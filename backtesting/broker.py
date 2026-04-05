@@ -59,7 +59,8 @@ class Broker:
 
     def open_trade(self, symbol: str, bar: Bar, side: int, size: float,
                    stop: float, take_profit: float,
-                   entry_price: Optional[float] = None) -> None:
+                   entry_price: Optional[float] = None,
+                   current_prices: Optional[Dict[str, float]] = None) -> None:
         """Open a new trade, subject to buying power and margin checks.
 
         Parameters
@@ -80,14 +81,19 @@ class Broker:
             Desired fill price. If None, fills at ``bar.open`` (next-bar-open
             execution). When provided, the strategy's specified price is used
             (e.g., ``bar.close`` for same-bar execution).
+        current_prices : dict, optional
+            Current prices for all assets. Used for accurate buying power and
+            margin checks in multi-asset portfolios. If None, falls back to
+            ``{symbol: bar.close}``.
         """
         if size <= 0:
             return
 
         raw_price = entry_price if entry_price is not None else bar.open
+        prices = current_prices if current_prices is not None else {symbol: bar.close}
 
         notional = abs(raw_price * size)
-        remaining_bp = self._remaining_buying_power({symbol: bar.close})
+        remaining_bp = self._remaining_buying_power(prices)
         if notional > remaining_bp:
             size = remaining_bp / raw_price
             notional = abs(raw_price * size)
@@ -101,9 +107,9 @@ class Broker:
         entry_px = self._price_with_slippage(raw_price, side)
 
         # Margin check: ensure equity covers projected margin requirement
-        projected_gross = self.portfolio.gross_notional({symbol: bar.close}) + notional
+        projected_gross = self.portfolio.gross_notional(prices) + notional
         projected_margin = projected_gross * self.portfolio.margin_rate
-        projected_equity = self.portfolio.compute_equity({symbol: bar.close})
+        projected_equity = self.portfolio.compute_equity(prices)
         if projected_equity < projected_margin:
             return
 

@@ -12,7 +12,7 @@ from backtesting.backtest import Backtester
 from backtesting.broker import Broker
 from backtesting.portfolio import Portfolio
 from backtesting.portfolio_backtest import (
-    PortfolioBacktester, PortfolioBacktestResult, RiskLimits, SkippedTrade,
+    AuditEvent, PortfolioBacktester, PortfolioBacktestResult, RiskLimits,
 )
 from backtesting.strategy import Strategy
 from backtesting.types import Bar, Trade
@@ -29,8 +29,8 @@ __all__ = [
     "PortfolioBacktestResult",
     "PortfolioBacktester",
     "RegimeAllocator",
+    "AuditEvent",
     "RiskLimits",
-    "SkippedTrade",
     "RiskParityAllocator",
     "Strategy",
     "Trade",

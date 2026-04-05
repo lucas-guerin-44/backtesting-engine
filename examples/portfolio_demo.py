@@ -55,6 +55,18 @@ STARTING_CASH = 100_000
 COMMISSION_BPS = 5.0
 SLIPPAGE_BPS = 2.0
 
+# Per-asset transaction costs (reflects real market microstructure)
+COSTS_BY_SYMBOL = {
+    "BTCUSD": {"commission_bps": 10.0, "slippage_bps": 5.0},   # Crypto: wider spreads
+    "EURUSD": {"commission_bps": 2.0, "slippage_bps": 1.0},    # Major FX: very tight
+    "GBPUSD": {"commission_bps": 2.0, "slippage_bps": 1.0},    # Major FX: very tight
+    "XAUUSD": {"commission_bps": 5.0, "slippage_bps": 3.0},    # Gold: moderate
+    "USOUSD": {"commission_bps": 5.0, "slippage_bps": 3.0},    # Oil: moderate
+    "SPX500": {"commission_bps": 3.0, "slippage_bps": 1.0},    # Index CFD: tight
+    "NDX100": {"commission_bps": 3.0, "slippage_bps": 1.0},    # Index CFD: tight
+    "GER40":  {"commission_bps": 3.0, "slippage_bps": 2.0},    # European index
+}
+
 # Map each instrument to a strategy that fits its asset class
 STRATEGY_MAP = {
     "XAUUSD": ("Trend Following", TrendFollowingStrategy),
@@ -208,6 +220,7 @@ def main():
             rebalance_frequency=500,
             vol_lookback=500,
             risk_limits=limits,
+            costs_by_symbol=COSTS_BY_SYMBOL,
         )
         result = pbt.run()
         portfolio_results[alloc_name] = result
@@ -223,11 +236,12 @@ def main():
             top = sorted(last_w.items(), key=lambda x: x[1], reverse=True)
             weights_str = "  ".join(f"{s}: {w:.1%}" for s, w in top)
             print(f"  Weights: {weights_str}")
-        if result.skipped_trades:
+        skips = [e for e in result.audit_log if e.event == "skip"]
+        if skips:
             from collections import Counter
-            reasons = Counter(s.reason for s in result.skipped_trades)
+            reasons = Counter(s.reason for s in skips)
             reasons_str = ", ".join(f"{r}: {n}" for r, n in reasons.most_common())
-            print(f"  Skipped: {len(result.skipped_trades)} trades ({reasons_str})")
+            print(f"  Skipped: {len(skips)} trades ({reasons_str})")
 
     # Save allocation comparison chart
     os.makedirs("docs", exist_ok=True)
