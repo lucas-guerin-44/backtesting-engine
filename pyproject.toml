@@ -1,0 +1,38 @@
+[project]
+name = "backtesting-engine"
+version = "2.0.0"
+description = "Event-driven and vectorized backtesting engine for trading strategies"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+
+dependencies = [
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+    "optuna>=3.0.0",
+]
+
+[project.optional-dependencies]
+api = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "pydantic>=2.0.0",
+]
+dashboard = [
+    "streamlit>=1.28.0",
+    "altair>=5.0.0",
+]
+plot = [
+    "matplotlib>=3.7.0",
+]
+dev = [
+    "pytest>=7.0.0",
+]
+all = [
+    "backtesting-engine[api,dashboard,plot,dev]",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
