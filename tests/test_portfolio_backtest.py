@@ -22,7 +22,7 @@ from backtesting.types import Bar, Trade
 # ---------------------------------------------------------------------------
 
 class NeverTradeStrategy(Strategy):
-    def on_bar(self, i, bar, cash):
+    def on_bar(self, i, bar, equity):
         return None
 
 
@@ -32,12 +32,12 @@ class BuyOnceStrategy(Strategy):
         self.tp_pct = tp_pct
         self.entered = False
 
-    def on_bar(self, i, bar, cash):
-        if not self.entered and cash > 10:
+    def on_bar(self, i, bar, equity):
+        if not self.entered and equity > 10:
             self.entered = True
             return Trade(
                 entry_bar=bar, side=1,
-                size=cash * 0.5 / bar.close,
+                size=equity * 0.5 / bar.close,
                 entry_price=bar.close,
                 stop_price=bar.close * (1 - self.stop_pct),
                 take_profit=bar.close * (1 + self.tp_pct),
@@ -46,10 +46,10 @@ class BuyOnceStrategy(Strategy):
 
 
 class AlwaysBuyStrategy(Strategy):
-    def on_bar(self, i, bar, cash):
-        if cash > 10:
+    def on_bar(self, i, bar, equity):
+        if equity > 10:
             return Trade(
-                entry_bar=bar, side=1, size=cash * 0.3 / bar.close,
+                entry_bar=bar, side=1, size=equity * 0.3 / bar.close,
                 entry_price=bar.close,
                 stop_price=bar.close * 0.90,
                 take_profit=bar.close * 1.10,

@@ -11,16 +11,16 @@ from backtesting.types import Bar, Trade
 
 class NeverTradeStrategy(Strategy):
     """Strategy that never enters a trade. Equity should stay flat."""
-    def on_bar(self, i, bar, cash):
+    def on_bar(self, i, bar, equity):
         return None
 
 
 class AlwaysBuyStrategy(Strategy):
-    """Buy on every bar (only first will fill since cash depletes)."""
-    def on_bar(self, i, bar, cash):
-        if cash > 10:
+    """Buy on every bar (only first will fill since equity depletes)."""
+    def on_bar(self, i, bar, equity):
+        if equity > 10:
             return Trade(
-                entry_bar=bar, side=1, size=cash * 0.5 / bar.close,
+                entry_bar=bar, side=1, size=equity * 0.5 / bar.close,
                 entry_price=bar.close,
                 stop_price=bar.close * 0.90,
                 take_profit=bar.close * 1.10,
@@ -36,12 +36,12 @@ class BuyOnceStrategy(Strategy):
         self.size_pct = size_pct
         self.entered = False
 
-    def on_bar(self, i, bar, cash):
-        if not self.entered and cash > 0:
+    def on_bar(self, i, bar, equity):
+        if not self.entered and equity > 0:
             self.entered = True
             return Trade(
                 entry_bar=bar, side=1,
-                size=cash * self.size_pct / bar.close,
+                size=equity * self.size_pct / bar.close,
                 entry_price=bar.close,
                 stop_price=bar.close * (1 - self.stop_pct),
                 take_profit=bar.close * (1 + self.tp_pct),
@@ -120,20 +120,21 @@ class TestCommissionAndSlippage:
 class TestGapAwareStops:
     def test_stop_fills_at_open_when_gap_through(self):
         """If price gaps below the stop, the fill should be at the open (worse), not the stop."""
-        # Bar 0: enter long at 100, stop at 95
-        # Bar 1: opens at 90 (gapped through stop) -> should fill at 90, not 95
+        # Bar 0: signal long at close=100, stop at 95
+        # Bar 1: entry fills at open=100; price holds
+        # Bar 2: opens at 90 (gapped through stop) -> should fill at 90, not 95
         data = {
-            "open": [100.0, 90.0],
-            "high": [101.0, 91.0],
-            "low": [99.0, 89.0],
-            "close": [100.0, 90.0],
+            "open": [100.0, 100.0, 90.0],
+            "high": [101.0, 101.0, 91.0],
+            "low": [99.0, 99.0, 89.0],
+            "close": [100.0, 100.0, 90.0],
         }
-        df = pd.DataFrame(data, index=pd.date_range("2024-01-01", periods=2, freq="h"))
+        df = pd.DataFrame(data, index=pd.date_range("2024-01-01", periods=3, freq="h"))
 
         class GapTestStrategy(Strategy):
             def __init__(self):
                 self.entered = False
-            def on_bar(self, i, bar, cash):
+            def on_bar(self, i, bar, equity):
                 if not self.entered:
                     self.entered = True
                     return Trade(
@@ -151,20 +152,21 @@ class TestGapAwareStops:
 
     def test_stop_fills_at_stop_when_touched(self):
         """Normal stop: price passes through stop within the bar -> fill at stop price."""
-        # Bar 0: enter long at 100, stop at 95
-        # Bar 1: opens at 98, low touches 94 -> stop at 95
+        # Bar 0: signal long at close=100, stop at 95
+        # Bar 1: entry fills at open=100; price holds
+        # Bar 2: opens at 98, low touches 94 -> stop at 95
         data = {
-            "open": [100.0, 98.0],
-            "high": [101.0, 99.0],
-            "low": [99.0, 94.0],
-            "close": [100.0, 95.0],
+            "open": [100.0, 100.0, 98.0],
+            "high": [101.0, 101.0, 99.0],
+            "low": [99.0, 99.0, 94.0],
+            "close": [100.0, 100.0, 95.0],
         }
-        df = pd.DataFrame(data, index=pd.date_range("2024-01-01", periods=2, freq="h"))
+        df = pd.DataFrame(data, index=pd.date_range("2024-01-01", periods=3, freq="h"))
 
         class StopTestStrategy(Strategy):
             def __init__(self):
                 self.entered = False
-            def on_bar(self, i, bar, cash):
+            def on_bar(self, i, bar, equity):
                 if not self.entered:
                     self.entered = True
                     return Trade(

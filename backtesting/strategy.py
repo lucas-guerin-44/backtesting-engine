@@ -13,13 +13,18 @@ class Strategy(ABC):
     during a backtest. Return a ``Trade`` to enter a position, or ``None``
     to do nothing.
 
+    Signals are executed on the **next bar's open** (no lookahead bias).
+    The strategy sees the current bar's close and decides whether to trade;
+    the Backtester queues the signal and fills it at the following bar's
+    open price.
+
     Example
     -------
     >>> class MyStrategy(Strategy):
-    ...     def on_bar(self, i: int, bar: Bar, cash: float) -> Optional[Trade]:
+    ...     def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Trade]:
     ...         if bar.close > bar.open:
     ...             return Trade(
-    ...                 entry_bar=bar, side=1, size=cash * 0.1 / bar.close,
+    ...                 entry_bar=bar, side=1, size=equity * 0.1 / bar.close,
     ...                 entry_price=bar.close,
     ...                 stop_price=bar.close * 0.98,
     ...                 take_profit=bar.close * 1.04,
@@ -28,7 +33,7 @@ class Strategy(ABC):
     """
 
     @abstractmethod
-    def on_bar(self, i: int, bar: Bar, cash: float) -> Optional[Trade]:
+    def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Trade]:
         """Generate a trading signal for the current bar.
 
         Parameters
@@ -37,12 +42,14 @@ class Strategy(ABC):
             Zero-based bar index in the backtest.
         bar : Bar
             Current OHLC bar.
-        cash : float
-            Available cash (after accounting for open positions).
+        equity : float
+            Current portfolio equity (cash + unrealized P&L). Use this for
+            position sizing and drawdown tracking.
 
         Returns
         -------
         Trade or None
-            A Trade object to open a new position, or None to skip.
+            A Trade object to open a new position (executed at next bar's
+            open), or None to skip.
         """
         ...

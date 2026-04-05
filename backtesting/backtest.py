@@ -127,6 +127,9 @@ class Backtester:
         # Track whether margin checks are needed
         has_margin = portfolio.margin_rate > 0
 
+        # Pending trade: signal generated on bar i, executed on bar i+1 at open
+        pending_trade = None
+
         for i in range(n):
             bar = Bar(ts[i], o[i], h[i], lo[i], c[i])
             close_i = c[i]
@@ -144,47 +147,36 @@ class Backtester:
                 open_pos = positions.get(symbol)
                 has_positions = open_pos is not None and len(open_pos) > 0
 
-            # Sync cash from portfolio (may have changed from exits)
+            # Execute pending trade from previous bar at this bar's open
+            if pending_trade is not None:
+                broker.open_trade(
+                    symbol=symbol, bar=bar,
+                    side=pending_trade.side, size=pending_trade.size,
+                    stop=pending_trade.stop_price,
+                    take_profit=pending_trade.take_profit,
+                    entry_price=None,  # Fills at bar.open (next-bar-open execution)
+                )
+                pending_trade = None
+                open_pos = positions.get(symbol)
+                has_positions = open_pos is not None and len(open_pos) > 0
+
+            # Sync cash from portfolio (may have changed from exits/entry)
             cash = portfolio.cash
 
             if has_positions:
-                # Compute available cash (subtract reserved notional)
-                reserved = 0.0
                 open_pnl = 0.0
                 for tr in open_pos:
-                    reserved += tr.entry_price * tr.size
                     open_pnl += (close_i - tr.entry_price) * tr.side * tr.size
-                available_cash = cash - reserved
                 equity = cash + open_pnl
             else:
-                available_cash = cash
                 equity = cash
 
             # Ask strategy for a new signal (pass equity so the strategy
-            # can correctly track peak equity and compute drawdown)
+            # can correctly track peak equity and compute drawdown).
+            # Signal is stored as pending — executes on next bar's open.
             new_trade = on_bar(i, bar, equity)
-
-            # Execute entry via Broker
             if new_trade is not None and new_trade.size > 0:
-                broker.open_trade(
-                    symbol=symbol, bar=bar,
-                    side=new_trade.side, size=new_trade.size,
-                    stop=new_trade.stop_price, take_profit=new_trade.take_profit,
-                    entry_price=new_trade.entry_price,
-                )
-                # Cash may have changed from commission
-                cash = portfolio.cash
-
-                # Recalculate equity with new position
-                open_pos = positions.get(symbol)
-                if open_pos:
-                    open_pnl = 0.0
-                    for tr in open_pos:
-                        open_pnl += (close_i - tr.entry_price) * tr.side * tr.size
-                    equity = cash + open_pnl
-                    has_positions = True
-                else:
-                    equity = cash
+                pending_trade = new_trade
 
             # Update drawdown tracking (inlined from Portfolio.update for speed)
             peak_equity = max(peak_equity, equity)
@@ -205,7 +197,6 @@ class Backtester:
                         portfolio.update(ts[i], current_prices)
                         cash = portfolio.cash
                         equity = cash
-                        # Portfolio.update handles the liquidation internally
 
             # Write equity to pre-allocated array
             equity_curve[i] = equity if equity > 0 else 0.0

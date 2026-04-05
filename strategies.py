@@ -12,11 +12,17 @@ All strategies share a common risk model:
 - Equity curve circuit breaker: halts new entries when drawdown exceeds a threshold
 - Cooldown between trades to prevent overtrading
 
+Signals are generated at bar close and executed at the next bar's open
+(no lookahead bias). The ``entry_price`` on the returned Trade is the
+signal price used for sizing; the Backtester overrides the fill to the
+next bar's open.
+
 Indicator computations use O(1) incremental classes from ``backtesting.indicators``
 — no pandas Series or numpy array allocations per bar.
 """
 
-from typing import List, Optional
+from collections import deque
+from typing import Optional
 
 from backtesting.indicators import ATR, RSI, EMA, BollingerBands
 from backtesting.strategy import Strategy
@@ -119,11 +125,11 @@ class TrendFollowingStrategy(Strategy):
         self._peak_equity = 0.0
         self._bars_since_trade = 999
 
-    def on_bar(self, i: int, bar: Bar, cash: float) -> Optional[Trade]:
+    def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Trade]:
         fast_val = self._fast_ema.update(bar.close)
         slow_val = self._slow_ema.update(bar.close)
         atr_val = self._atr.update(bar.high, bar.low, bar.close)
-        self._peak_equity = max(self._peak_equity, cash)
+        self._peak_equity = max(self._peak_equity, equity)
         self._bars_since_trade += 1
 
         if fast_val is None or slow_val is None or atr_val is None or atr_val <= 0:
@@ -143,7 +149,7 @@ class TrendFollowingStrategy(Strategy):
             entry = bar.close
             stop = entry - atr_val * self.atr_stop_mult
             tp = entry + atr_val * self.atr_target_mult
-            size = risk_adjusted_size(cash, entry, stop, self.risk_per_trade,
+            size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
                                       self._peak_equity, self.max_dd_halt)
             if size > 0:
                 self._bars_since_trade = 0
@@ -155,7 +161,7 @@ class TrendFollowingStrategy(Strategy):
             entry = bar.close
             stop = entry + atr_val * self.atr_stop_mult
             tp = entry - atr_val * self.atr_target_mult
-            size = risk_adjusted_size(cash, entry, stop, self.risk_per_trade,
+            size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
                                       self._peak_equity, self.max_dd_halt)
             if size > 0:
                 self._bars_since_trade = 0
@@ -203,11 +209,11 @@ class MeanReversionStrategy(Strategy):
         self._peak_equity = 0.0
         self._bars_since_trade = 999
 
-    def on_bar(self, i: int, bar: Bar, cash: float) -> Optional[Trade]:
+    def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Trade]:
         bb_lower, bb_mid, bb_upper = self._bb.update(bar.close)
         rsi_val = self._rsi.update(bar.close)
         atr_val = self._atr.update(bar.high, bar.low, bar.close)
-        self._peak_equity = max(self._peak_equity, cash)
+        self._peak_equity = max(self._peak_equity, equity)
         self._bars_since_trade += 1
 
         if bb_lower is None or rsi_val is None or atr_val is None or atr_val <= 0:
@@ -219,7 +225,7 @@ class MeanReversionStrategy(Strategy):
         if bar.low <= bb_lower and rsi_val <= self.rsi_oversold:
             entry = bar.close
             stop = entry - atr_val * self.atr_stop_mult
-            size = risk_adjusted_size(cash, entry, stop, self.risk_per_trade,
+            size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
                                       self._peak_equity, self.max_dd_halt)
             if size > 0:
                 self._bars_since_trade = 0
@@ -230,7 +236,7 @@ class MeanReversionStrategy(Strategy):
         if bar.high >= bb_upper and rsi_val >= self.rsi_overbought:
             entry = bar.close
             stop = entry + atr_val * self.atr_stop_mult
-            size = risk_adjusted_size(cash, entry, stop, self.risk_per_trade,
+            size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
                                       self._peak_equity, self.max_dd_halt)
             if size > 0:
                 self._bars_since_trade = 0
@@ -271,14 +277,14 @@ class MomentumStrategy(Strategy):
         self.cooldown_bars = cooldown_bars
 
         self._atr = ATR(atr_period)
-        self._closes: List[float] = []
+        self._closes: deque = deque(maxlen=lookback + 1)
         self._peak_equity = 0.0
         self._bars_since_trade = 999
 
-    def on_bar(self, i: int, bar: Bar, cash: float) -> Optional[Trade]:
+    def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Trade]:
         self._closes.append(bar.close)
         atr_val = self._atr.update(bar.high, bar.low, bar.close)
-        self._peak_equity = max(self._peak_equity, cash)
+        self._peak_equity = max(self._peak_equity, equity)
         self._bars_since_trade += 1
 
         if len(self._closes) <= self.lookback or atr_val is None or atr_val <= 0:
@@ -286,13 +292,13 @@ class MomentumStrategy(Strategy):
         if self._bars_since_trade < self.cooldown_bars:
             return None
 
-        roc = (self._closes[-1] - self._closes[-self.lookback - 1]) / self._closes[-self.lookback - 1]
+        roc = (self._closes[-1] - self._closes[0]) / self._closes[0]
 
         if roc > self.entry_threshold:
             entry = bar.close
             stop = entry - atr_val * self.atr_stop_mult
             tp = entry + atr_val * self.atr_target_mult
-            size = risk_adjusted_size(cash, entry, stop, self.risk_per_trade,
+            size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
                                       self._peak_equity, self.max_dd_halt)
             if size > 0:
                 self._bars_since_trade = 0
@@ -303,7 +309,7 @@ class MomentumStrategy(Strategy):
             entry = bar.close
             stop = entry + atr_val * self.atr_stop_mult
             tp = entry - atr_val * self.atr_target_mult
-            size = risk_adjusted_size(cash, entry, stop, self.risk_per_trade,
+            size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
                                       self._peak_equity, self.max_dd_halt)
             if size > 0:
                 self._bars_since_trade = 0
@@ -342,16 +348,16 @@ class DonchianBreakoutStrategy(Strategy):
         self.cooldown_bars = cooldown_bars
 
         self._atr = ATR(atr_period)
-        self._highs: List[float] = []
-        self._lows: List[float] = []
+        self._highs: deque = deque(maxlen=channel_period + 1)
+        self._lows: deque = deque(maxlen=channel_period + 1)
         self._peak_equity = 0.0
         self._bars_since_trade = 999
 
-    def on_bar(self, i: int, bar: Bar, cash: float) -> Optional[Trade]:
+    def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Trade]:
         self._highs.append(bar.high)
         self._lows.append(bar.low)
         atr_val = self._atr.update(bar.high, bar.low, bar.close)
-        self._peak_equity = max(self._peak_equity, cash)
+        self._peak_equity = max(self._peak_equity, equity)
         self._bars_since_trade += 1
 
         if len(self._highs) <= self.channel_period or atr_val is None or atr_val <= 0:
@@ -360,14 +366,16 @@ class DonchianBreakoutStrategy(Strategy):
             return None
 
         # Channel from lookback window (excluding current bar)
-        ch_high = max(self._highs[-(self.channel_period + 1):-1])
-        ch_low = min(self._lows[-(self.channel_period + 1):-1])
+        highs_list = list(self._highs)
+        lows_list = list(self._lows)
+        ch_high = max(highs_list[:-1])
+        ch_low = min(lows_list[:-1])
 
         if bar.close > ch_high:
             entry = bar.close
             stop = entry - atr_val * self.atr_stop_mult
             tp = entry + (entry - stop) * self.risk_reward
-            size = risk_adjusted_size(cash, entry, stop, self.risk_per_trade,
+            size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
                                       self._peak_equity, self.max_dd_halt)
             if size > 0:
                 self._bars_since_trade = 0
@@ -378,7 +386,7 @@ class DonchianBreakoutStrategy(Strategy):
             entry = bar.close
             stop = entry + atr_val * self.atr_stop_mult
             tp = entry - (stop - entry) * self.risk_reward
-            size = risk_adjusted_size(cash, entry, stop, self.risk_per_trade,
+            size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
                                       self._peak_equity, self.max_dd_halt)
             if size > 0:
                 self._bars_since_trade = 0

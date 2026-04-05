@@ -115,8 +115,8 @@ def main():
     # ------------------------------------------------------------------
 
     print(f"{'Instrument':<10s} {'Strategy':<18s} {'Bars':>7s} {'Return':>9s} "
-          f"{'Max DD':>8s} {'Sharpe':>8s} {'Trades':>7s} {'Win %':>7s}")
-    print("-" * 78)
+          f"{'B&H':>9s} {'Max DD':>8s} {'Sharpe':>8s} {'Trades':>7s} {'Win %':>7s}")
+    print("-" * 88)
 
     for sym in symbols:
         strat_name, strat_cls = STRATEGY_MAP.get(sym, ("Trend Following", TrendFollowingStrategy))
@@ -132,8 +132,13 @@ def main():
         ret = (eq[-1] - STARTING_CASH) / STARTING_CASH * 100
         sharpe = compute_sharpe(eq)
 
+        # Buy-and-hold benchmark
+        closes = dataframes[sym]["close"]
+        bnh = (closes.iloc[-1] - closes.iloc[0]) / closes.iloc[0] * 100
+
         print(f"{sym:<10s} {strat_name:<18s} {len(eq):>7,} {ret:>+8.2f}% "
-              f"{bt.max_drawdown*100:>7.2f}% {sharpe:>8.4f} {len(trades):>7d} {win_rate:>6.1f}%")
+              f"{bnh:>+8.2f}% {bt.max_drawdown*100:>7.2f}% {sharpe:>8.4f} "
+              f"{len(trades):>7d} {win_rate:>6.1f}%")
 
     # ------------------------------------------------------------------
     section("2. Multi-Asset Portfolio — Allocation Comparison")
@@ -173,9 +178,17 @@ def main():
           f"per-asset<={limits.max_single_asset:.0%}, "
           f"max positions={limits.max_open_positions}")
     print()
+    # Equal-weight buy-and-hold benchmark
+    bnh_returns = []
+    for sym in symbols:
+        closes = dataframes[sym]["close"]
+        bnh_returns.append((closes.iloc[-1] - closes.iloc[0]) / closes.iloc[0])
+    bnh_portfolio = np.mean(bnh_returns) * 100
+
     print(f"{'Allocator':<16s} {'Return':>9s} {'Max DD':>8s} {'Sharpe':>8s} "
           f"{'Trades':>7s}")
     print("-" * 52)
+    print(f"{'Buy & Hold':<16s} {bnh_portfolio:>+8.2f}%      -        -        -")
 
     portfolio_results = {}  # For charting
 

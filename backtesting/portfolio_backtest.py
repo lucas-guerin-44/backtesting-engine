@@ -218,6 +218,8 @@ class PortfolioBacktester:
         allocation_history: List[Dict[str, float]] = []
         per_asset_trades: Dict[str, List[Trade]] = {sym: [] for sym in symbols}
         closed_count = 0  # Track broker.closed_trades length to detect new closures
+        # Pending trades: signal on bar i, execute on bar i+1 at open
+        pending_trades: Dict[str, Trade] = {}
 
         # Local refs for speed
         strats = {sym: self.strategies[sym].on_bar for sym in symbols}
@@ -256,10 +258,38 @@ class PortfolioBacktester:
                             broker.closed_trades[closed_count + j])
                     closed_count += new_closed
 
-            # Sync cash after all exits
+            # PHASE 2: Execute pending trades from previous bar at this bar's open
+            for sym in list(pending_trades.keys()):
+                pt = pending_trades.pop(sym)
+                if not is_real[sym][i]:
+                    continue
+                bar = Bar(ts[i], o[sym][i], h[sym][i], lo[sym][i], c[sym][i])
+
+                # Re-check risk limits at execution time
+                if risk_limits is not None:
+                    # Compute current equity for the check
+                    _cash = portfolio.cash
+                    _pnl = 0.0
+                    for s2 in symbols:
+                        for tr in positions.get(s2, []):
+                            _pnl += (c[s2][i] - tr.entry_price) * tr.side * tr.size
+                    _eq = _cash + _pnl
+                    if not self._check_risk_limits(
+                        risk_limits, sym, pt, positions, c, i, symbols, _eq,
+                    ):
+                        continue
+
+                broker.open_trade(
+                    symbol=sym, bar=bar,
+                    side=pt.side, size=pt.size,
+                    stop=pt.stop_price, take_profit=pt.take_profit,
+                    entry_price=None,  # Fills at bar.open (next-bar-open execution)
+                )
+
+            # Sync cash after all exits and entries
             cash = portfolio.cash
 
-            # PHASE 2: Recompute allocation weights if needed
+            # PHASE 3: Recompute allocation weights if needed
             rebal = self.rebalance_frequency
             if rebal > 0 and i > 0 and i % rebal == 0:
                 weights = self.allocator.compute_weights(
@@ -267,18 +297,15 @@ class PortfolioBacktester:
                 current_weights = weights.weights
                 allocation_history.append(dict(current_weights))
 
-            # PHASE 3: Compute portfolio equity for strategy signals
-            current_prices = {sym: c[sym][i] for sym in symbols}
+            # PHASE 4: Compute portfolio equity for strategy signals
             open_pnl_total = 0.0
             for sym in symbols:
                 for tr in positions.get(sym, []):
                     open_pnl_total += (c[sym][i] - tr.entry_price) * tr.side * tr.size
             portfolio_equity = cash + open_pnl_total
 
-            # PHASE 4: Call each strategy on its real bars
-            # Pass equity * weight so strategies can correctly track peak
-            # equity and drawdown. The Broker's buying power check prevents
-            # oversizing beyond what's actually deployable.
+            # PHASE 5: Call each strategy on its real bars
+            # Signals are stored as pending — execute on next bar's open.
             for sym in symbols:
                 if not is_real[sym][i]:
                     continue
@@ -290,26 +317,7 @@ class PortfolioBacktester:
                 new_trade = strats[sym](li, bar, asset_equity)
 
                 if new_trade is not None and new_trade.size > 0:
-                    # Risk limits check
-                    if risk_limits is not None and not self._check_risk_limits(
-                        risk_limits, sym, new_trade, positions, c, i,
-                        symbols, portfolio_equity,
-                    ):
-                        continue
-
-                    broker.open_trade(
-                        symbol=sym, bar=bar,
-                        side=new_trade.side, size=new_trade.size,
-                        stop=new_trade.stop_price, take_profit=new_trade.take_profit,
-                        entry_price=new_trade.entry_price,
-                    )
-                    cash = portfolio.cash
-                    # Recalculate equity for remaining assets
-                    open_pnl_total = 0.0
-                    for s2 in symbols:
-                        for tr in positions.get(s2, []):
-                            open_pnl_total += (c[s2][i] - tr.entry_price) * tr.side * tr.size
-                    portfolio_equity = cash + open_pnl_total
+                    pending_trades[sym] = new_trade
 
             # PHASE 5: Compute portfolio equity
             current_prices = {sym: c[sym][i] for sym in symbols}
