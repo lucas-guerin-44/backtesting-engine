@@ -1,6 +1,6 @@
 # Backtesting Engine 2.0
 
-[![Tests](https://github.com/lucas-guerin-44/backtesting-engine-2.0/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-guerin-44/backtesting-engine-2.0/actions/workflows/test.yml)
+[![Tests](https://github.com/lucas-guerin-44/backtesting-engine/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-guerin-44/backtesting-engine/actions/workflows/test.yml)
 
 An event-driven and vectorized backtesting engine for evaluating trading strategies on historical OHLC data. Built with Python, FastAPI, and Streamlit.
 
