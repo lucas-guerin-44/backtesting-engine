@@ -258,11 +258,11 @@ class PortfolioBacktester:
                             broker.closed_trades[closed_count + j])
                     closed_count += new_closed
 
-            # PHASE 2: Execute pending trades from previous bar at this bar's open
+            # PHASE 2: Execute pending trades at this bar's open (only on real bars)
             for sym in list(pending_trades.keys()):
-                pt = pending_trades.pop(sym)
                 if not is_real[sym][i]:
-                    continue
+                    continue  # Keep pending until next real bar for this symbol
+                pt = pending_trades.pop(sym)
                 bar = Bar(ts[i], o[sym][i], h[sym][i], lo[sym][i], c[sym][i])
 
                 # Re-check risk limits at execution time
@@ -297,7 +297,7 @@ class PortfolioBacktester:
                 current_weights = weights.weights
                 allocation_history.append(dict(current_weights))
 
-            # PHASE 4: Compute portfolio equity for strategy signals
+            # PHASE 4: Compute portfolio equity for risk limits
             open_pnl_total = 0.0
             for sym in symbols:
                 for tr in positions.get(sym, []):
@@ -306,12 +306,18 @@ class PortfolioBacktester:
 
             # PHASE 5: Call each strategy on its real bars
             # Signals are stored as pending — execute on next bar's open.
+            # Each strategy receives its own equity slice: (cash * weight) + own
+            # open P&L. This prevents cross-asset P&L from contaminating the
+            # strategy's drawdown guard.
             for sym in symbols:
                 if not is_real[sym][i]:
                     continue
 
                 bar = Bar(ts[i], o[sym][i], h[sym][i], lo[sym][i], c[sym][i])
-                asset_equity = portfolio_equity * current_weights.get(sym, 0.0)
+                sym_pnl = 0.0
+                for tr in positions.get(sym, []):
+                    sym_pnl += (c[sym][i] - tr.entry_price) * tr.side * tr.size
+                asset_equity = cash * current_weights.get(sym, 0.0) + sym_pnl
 
                 li = local_idx[sym][i]
                 new_trade = strats[sym](li, bar, asset_equity)
