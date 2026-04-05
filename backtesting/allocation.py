@@ -1,9 +1,11 @@
 """Portfolio allocation weight calculators for multi-asset backtesting.
 
-Three schemes:
+Four schemes:
 - **Equal weight**: 1/N per asset
 - **Risk parity**: Weight inversely by rolling volatility
 - **Correlation-aware**: Risk parity scaled by inverse average pairwise correlation
+- **Regime-aware**: Shifts weight between trend and mean-reversion assets based
+  on a rolling volatility regime signal
 
 All allocators gracefully degrade to simpler methods when insufficient data is
 available (e.g., risk parity falls back to equal weight during warmup).
@@ -11,7 +13,7 @@ available (e.g., risk parity falls back to equal weight during warmup).
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Set
 
 import numpy as np
 import pandas as pd
@@ -156,3 +158,128 @@ class CorrelationAwareAllocator(Allocator):
         total = sum(raw.values())
         w = {s: v / total for s, v in raw.items()}
         return AllocationWeights(weights=w, method="correlation_aware")
+
+
+class RegimeAllocator(Allocator):
+    """Shift allocation between trend-following and mean-reversion assets
+    based on a rolling volatility regime signal.
+
+    Measures the average cross-asset volatility percentile over a long history
+    window. When current vol is elevated (above ``vol_threshold_pct``), the
+    market is in a "trending" regime and trend-following assets get boosted.
+    When vol is low, mean-reversion assets get boosted.
+
+    Uses risk parity as the base weighting, then applies a regime multiplier.
+
+    Parameters
+    ----------
+    trend_symbols : set of str
+        Symbols running trend-following or momentum strategies.
+    reversion_symbols : set of str
+        Symbols running mean-reversion strategies.
+    vol_lookback : int
+        Short window for measuring current volatility.
+    vol_history : int
+        Long window for building the vol distribution (percentile baseline).
+    vol_threshold_pct : float
+        Percentile threshold (0-100). Above = trending regime, below = mean-rev.
+    regime_boost : float
+        Multiplier applied to the favored group's weights (>1.0). The
+        unfavored group gets ``1 / regime_boost``. Weights are renormalized.
+    min_lookback : int
+        Minimum bars before regime detection activates (falls back to risk parity).
+    """
+
+    def __init__(
+        self,
+        trend_symbols: Set[str],
+        reversion_symbols: Set[str],
+        vol_lookback: int = 100,
+        vol_history: int = 2000,
+        vol_threshold_pct: float = 50.0,
+        regime_boost: float = 2.0,
+        min_lookback: int = 200,
+    ):
+        self.trend_symbols = set(trend_symbols)
+        self.reversion_symbols = set(reversion_symbols)
+        self.vol_lookback = vol_lookback
+        self.vol_history = vol_history
+        self.vol_threshold_pct = vol_threshold_pct
+        self.regime_boost = regime_boost
+        self.min_lookback = min_lookback
+
+    def compute_weights(self, symbols, close_arrays, lookback, current_idx):
+        # Fall back to risk parity during warmup
+        if current_idx < self.min_lookback:
+            return RiskParityAllocator(min(self.min_lookback, 20)).compute_weights(
+                symbols, close_arrays, lookback, current_idx)
+
+        # Measure current vol percentile across all assets
+        regime = self._detect_regime(symbols, close_arrays, current_idx)
+
+        # Start from risk parity base weights
+        rp = RiskParityAllocator(20).compute_weights(
+            symbols, close_arrays, lookback, current_idx)
+
+        # Apply regime boost
+        raw = {}
+        for sym in symbols:
+            base = rp.weights[sym]
+            if regime == "trending" and sym in self.trend_symbols:
+                raw[sym] = base * self.regime_boost
+            elif regime == "ranging" and sym in self.reversion_symbols:
+                raw[sym] = base * self.regime_boost
+            elif regime == "trending" and sym in self.reversion_symbols:
+                raw[sym] = base / self.regime_boost
+            elif regime == "ranging" and sym in self.trend_symbols:
+                raw[sym] = base / self.regime_boost
+            else:
+                # Symbol not in either group — keep base weight
+                raw[sym] = base
+
+        total = sum(raw.values())
+        w = {s: v / total for s, v in raw.items()}
+        return AllocationWeights(
+            weights=w, method=f"regime:{regime}")
+
+    def _detect_regime(
+        self, symbols: List[str], close_arrays: Dict[str, np.ndarray],
+        current_idx: int,
+    ) -> str:
+        """Classify current market regime based on cross-asset vol percentile.
+
+        Returns ``"trending"`` or ``"ranging"``.
+        """
+        history_start = max(0, current_idx - self.vol_history)
+        short_start = max(0, current_idx - self.vol_lookback)
+
+        percentiles = []
+        for sym in symbols:
+            closes = close_arrays[sym][history_start:current_idx + 1]
+            if len(closes) < self.vol_lookback + 10:
+                continue
+
+            returns = np.diff(closes) / closes[:-1]
+
+            # Rolling vol over the full history window using a stride trick
+            # would be ideal, but a simple expanding comparison is enough:
+            # current short-window vol vs distribution of all short-window vols
+            current_vol = np.std(returns[-self.vol_lookback:], ddof=1)
+
+            # Build distribution of historical short-window vols
+            n_windows = len(returns) - self.vol_lookback + 1
+            if n_windows < 10:
+                continue
+            hist_vols = np.array([
+                np.std(returns[i:i + self.vol_lookback], ddof=1)
+                for i in range(0, n_windows, max(1, n_windows // 100))
+            ])
+
+            pct = np.sum(hist_vols <= current_vol) / len(hist_vols) * 100
+            percentiles.append(pct)
+
+        if not percentiles:
+            return "trending"  # Default to trending when no data
+
+        avg_pct = np.mean(percentiles)
+        return "trending" if avg_pct >= self.vol_threshold_pct else "ranging"

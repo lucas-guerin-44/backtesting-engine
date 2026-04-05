@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backtesting.allocation import (
     CorrelationAwareAllocator,
     EqualWeightAllocator,
+    RegimeAllocator,
     RiskParityAllocator,
 )
 from backtesting.backtest import Backtester
@@ -46,7 +47,7 @@ INSTRUMENTS = [
     "XAUUSD", "EURUSD", "BTCUSD", "SPX500",
     "NDX100", "GER40", "GBPUSD", "USOUSD",
 ]
-TIMEFRAME = "H1"
+TIMEFRAME = "D1"
 START_DATE = "2019-01-01"
 END_DATE = "2024-12-31"
 STARTING_CASH = 100_000
@@ -137,10 +138,25 @@ def main():
     section("2. Multi-Asset Portfolio — Allocation Comparison")
     # ------------------------------------------------------------------
 
+    # Build trend/reversion symbol sets from the strategy map
+    trend_syms = {s for s in symbols
+                  if STRATEGY_MAP.get(s, (None,))[0] in ("Trend Following", "Momentum", "Donchian")}
+    revert_syms = {s for s in symbols
+                   if STRATEGY_MAP.get(s, (None,))[0] == "Mean Reversion"}
+
     allocators = {
         "Equal Weight": EqualWeightAllocator(),
         "Risk Parity": RiskParityAllocator(min_lookback=60),
         "Corr-Aware": CorrelationAwareAllocator(min_lookback=60),
+        "Regime-Aware": RegimeAllocator(
+            trend_symbols=trend_syms,
+            reversion_symbols=revert_syms,
+            vol_lookback=200,
+            vol_history=5000,
+            vol_threshold_pct=50.0,
+            regime_boost=2.0,
+            min_lookback=300,
+        ),
     }
 
     print(f"{'Allocator':<16s} {'Return':>9s} {'Max DD':>8s} {'Sharpe':>8s} "
@@ -177,12 +193,12 @@ def main():
             weights_str = "  ".join(f"{s}: {w:.1%}" for s, w in top)
             print(f"  Weights: {weights_str}")
 
+    opt_symbols = symbols
+    opt_dfs = dataframes
+
     # ------------------------------------------------------------------
     section(f"3. Portfolio Optimization ({len(opt_symbols)} assets, 30 trials)")
     # ------------------------------------------------------------------
-
-    opt_symbols = symbols
-    opt_dfs = dataframes
 
     configs = {}
     for sym in opt_symbols:

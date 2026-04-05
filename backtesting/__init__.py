@@ -5,6 +5,7 @@ from backtesting.allocation import (
     AllocationWeights,
     CorrelationAwareAllocator,
     EqualWeightAllocator,
+    RegimeAllocator,
     RiskParityAllocator,
 )
 from backtesting.backtest import Backtester
@@ -25,6 +26,7 @@ __all__ = [
     "Portfolio",
     "PortfolioBacktestResult",
     "PortfolioBacktester",
+    "RegimeAllocator",
     "RiskParityAllocator",
     "Strategy",
     "Trade",
