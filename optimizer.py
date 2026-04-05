@@ -51,7 +51,7 @@ import optuna
 import pandas as pd
 
 from backtesting.backtest import Backtester
-from utils import compute_sharpe
+from utils import compute_sharpe, infer_freq_per_year
 
 # Suppress Optuna's verbose trial logging (we log summaries ourselves)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -62,19 +62,22 @@ logger = logging.getLogger(__name__)
 # Objective functions
 # ---------------------------------------------------------------------------
 
-def _sharpe_objective(equity_curve: np.ndarray, trades: list) -> float:
+def _sharpe_objective(equity_curve: np.ndarray, trades: list,
+                      freq_per_year: int = 252) -> float:
     """Maximize Sharpe ratio."""
-    return compute_sharpe(equity_curve)
+    return compute_sharpe(equity_curve, freq_per_year=freq_per_year)
 
 
-def _return_objective(equity_curve: np.ndarray, trades: list) -> float:
+def _return_objective(equity_curve: np.ndarray, trades: list,
+                      freq_per_year: int = 252) -> float:
     """Maximize percentage return."""
     if len(equity_curve) < 2 or equity_curve[0] == 0:
         return 0.0
     return (equity_curve[-1] - equity_curve[0]) / equity_curve[0]
 
 
-def _calmar_objective(equity_curve: np.ndarray, trades: list) -> float:
+def _calmar_objective(equity_curve: np.ndarray, trades: list,
+                      freq_per_year: int = 252) -> float:
     """Maximize Calmar ratio (return / max drawdown). Penalizes large drawdowns."""
     if len(equity_curve) < 2 or equity_curve[0] == 0:
         return 0.0
@@ -87,7 +90,8 @@ def _calmar_objective(equity_curve: np.ndarray, trades: list) -> float:
     return ret / max_dd
 
 
-def _sortino_objective(equity_curve: np.ndarray, trades: list) -> float:
+def _sortino_objective(equity_curve: np.ndarray, trades: list,
+                       freq_per_year: int = 252) -> float:
     """Maximize Sortino ratio (return / downside deviation)."""
     if len(equity_curve) < 2:
         return 0.0
@@ -97,11 +101,11 @@ def _sortino_objective(equity_curve: np.ndarray, trades: list) -> float:
         return 0.0
     downside = returns[returns < 0]
     if len(downside) == 0:
-        return np.mean(returns) * np.sqrt(252)
+        return np.mean(returns) * np.sqrt(freq_per_year)
     downside_std = np.std(downside)
     if downside_std == 0:
         return 0.0
-    return (np.mean(returns) / downside_std) * np.sqrt(252)
+    return (np.mean(returns) / downside_std) * np.sqrt(freq_per_year)
 
 
 OBJECTIVES: Dict[str, Callable] = {
@@ -205,6 +209,7 @@ def optimize(
         raise ValueError(f"Unknown objective '{objective}'. Choose from: {list(OBJECTIVES)}")
 
     fixed = fixed_params or {}
+    freq = infer_freq_per_year(df.index)
 
     def _objective(trial: optuna.Trial) -> float:
         params = {name: _suggest_param(trial, name, bounds)
@@ -217,7 +222,7 @@ def optimize(
                             commission_bps=commission_bps, slippage_bps=slippage_bps,
                             symbol=symbol)
             equity_curve, trades = bt.run()
-            score = obj_fn(equity_curve, trades)
+            score = obj_fn(equity_curve, trades, freq_per_year=freq)
             return score if np.isfinite(score) else -999.0
         except Exception as e:
             logger.warning(f"Trial {trial.number} failed: {e}")
@@ -302,6 +307,7 @@ def walk_forward(
     if obj_fn is None:
         raise ValueError(f"Unknown objective '{objective}'. Choose from: {list(OBJECTIVES)}")
 
+    freq = infer_freq_per_year(df.index)
     total_bars = len(df)
     window_size = total_bars // n_splits
     if window_size < 50:
@@ -342,7 +348,7 @@ def walk_forward(
                         commission_bps=commission_bps, slippage_bps=slippage_bps,
                         symbol=symbol)
         eq, trades = bt.run()
-        oos_score = obj_fn(eq, trades)
+        oos_score = obj_fn(eq, trades, freq_per_year=freq)
 
         split_result = {
             "split": split_idx,

@@ -263,51 +263,45 @@ class VectorizedBacktester:
             return abs_idx, tp
 
     def _build_equity_curve(self, trades: List[VectorizedTrade], close: np.ndarray) -> np.ndarray:
-        """Build the full equity curve from trade list using numpy."""
+        """Build the full equity curve from trade list.
+
+        Trades are sequential (no overlaps) because the main loop exits one
+        trade before entering the next. This means the equity curve has three
+        kinds of regions:
+
+        1. **Flat** (between trades): equity = starting_cash + realized PnL so far
+        2. **In-trade**: equity = flat base - entry commission + unrealized PnL
+        3. **After all trades**: equity = starting_cash + total realized PnL
+
+        The in-trade unrealized PnL is computed as a numpy slice (vectorized),
+        not per-bar.
+        """
         n = self.n
         equity = np.full(n, self.starting_cash, dtype=np.float64)
 
-        # Apply realized PnL as step changes (cash changes after each trade exit)
-        cumulative_pnl = 0.0
-        entry_costs = 0.0
+        if not trades:
+            return equity
 
-        # Sort trades by entry (should already be sorted, but be safe)
-        for t in trades:
-            entry_comm = abs(t.entry_price * t.size * self.comm_factor)
-
-            # From entry to exit: equity includes unrealized PnL
-            if t.entry_idx < t.exit_idx:
-                unrealized = (close[t.entry_idx:t.exit_idx + 1] - t.entry_price) * t.side * t.size
-                equity[t.entry_idx:t.exit_idx + 1] += cumulative_pnl - entry_comm + unrealized
-
-            # After exit: cash includes this trade's realized PnL
-            cumulative_pnl += t.pnl
-            if t.exit_idx + 1 < n:
-                pass  # Will be applied below
-
-        # Apply cumulative realized PnL to all bars after all trades
-        # (rebuild properly to handle overlapping regions)
-        equity = np.full(n, self.starting_cash, dtype=np.float64)
-        realized_so_far = 0.0
-        prev_exit = 0
+        realized = 0.0
+        prev_end = 0
 
         for t in trades:
-            # Flat region before this trade (after previous exit)
-            equity[prev_exit:t.entry_idx] += realized_so_far
+            # Flat region: bars from previous trade's exit to this trade's entry
+            if t.entry_idx > prev_end:
+                equity[prev_end:t.entry_idx] += realized
 
-            # Entry commission
+            # In-trade region: base + unrealized PnL (vectorized slice)
             entry_comm = abs(t.entry_price * t.size * self.comm_factor)
+            trade_base = self.starting_cash + realized - entry_comm
+            trade_slice = slice(t.entry_idx, min(t.exit_idx + 1, n))
+            unrealized = (close[trade_slice] - t.entry_price) * t.side * t.size
+            equity[trade_slice] = trade_base + unrealized
 
-            # During trade: cash + unrealized
-            for j in range(t.entry_idx, min(t.exit_idx + 1, n)):
-                unrealized = (close[j] - t.entry_price) * t.side * t.size
-                equity[j] = self.starting_cash + realized_so_far - entry_comm + unrealized
-
-            realized_so_far += t.pnl
-            prev_exit = t.exit_idx + 1
+            realized += t.pnl
+            prev_end = t.exit_idx + 1
 
         # Flat region after last trade
-        if prev_exit < n:
-            equity[prev_exit:] += realized_so_far
+        if prev_end < n:
+            equity[prev_end:] += realized
 
         return np.maximum(equity, 0.0)

@@ -28,7 +28,7 @@ from backtesting.types import Bar, Trade
 # ---------------------------------------------------------------------------
 
 def risk_adjusted_size(
-    cash: float,
+    equity: float,
     entry_price: float,
     stop_price: float,
     risk_per_trade: float,
@@ -39,14 +39,14 @@ def risk_adjusted_size(
 
     Parameters
     ----------
-    cash : float
-        Available cash.
+    equity : float
+        Current portfolio equity (cash + open P&L).
     entry_price : float
         Intended entry price.
     stop_price : float
         Stop-loss price.
     risk_per_trade : float
-        Fraction of cash to risk on this trade (e.g. 0.02 = 2%).
+        Fraction of equity to risk on this trade (e.g. 0.02 = 2%).
     peak_equity : float
         Highest equity value seen so far.
     max_dd_halt : float
@@ -56,11 +56,13 @@ def risk_adjusted_size(
     -------
     float
         Position size in units, or 0.0 if the trade should be skipped.
+        The Broker's buying power check provides the final guard against
+        oversizing beyond available capital.
     """
-    if cash <= 0 or entry_price <= 0:
+    if equity <= 0 or entry_price <= 0:
         return 0.0
 
-    current_dd = (peak_equity - cash) / peak_equity if peak_equity > 0 else 0.0
+    current_dd = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
     if current_dd >= max_dd_halt:
         return 0.0
 
@@ -71,9 +73,9 @@ def risk_adjusted_size(
     if risk_per_unit <= 0:
         return 0.0
 
-    risk_capital = cash * risk_per_trade * dd_scale
+    risk_capital = equity * risk_per_trade * dd_scale
     size = risk_capital / risk_per_unit
-    return min(size, cash / entry_price)
+    return min(size, equity / entry_price)
 
 
 # ---------------------------------------------------------------------------

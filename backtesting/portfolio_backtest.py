@@ -26,6 +26,7 @@ from backtesting.allocation import Allocator, AllocationWeights, EqualWeightAllo
 from backtesting.data import validate_ohlc
 from backtesting.portfolio import Portfolio
 from backtesting.types import Bar, Trade
+from utils import infer_freq_per_year
 
 
 @dataclass
@@ -108,6 +109,9 @@ class PortfolioBacktester:
 
         # Build aligned master timeline
         self._align_data(dataframes)
+
+        # Infer annualization factor from the aligned timeline
+        self.freq_per_year = infer_freq_per_year(self._ts)
 
     def _align_data(self, dataframes: Dict[str, pd.DataFrame]) -> None:
         """Union all timestamps, forward-fill, and pre-extract numpy arrays."""
@@ -236,23 +240,27 @@ class PortfolioBacktester:
                 current_weights = weights.weights
                 allocation_history.append(dict(current_weights))
 
-            # PHASE 3: Compute available cash (subtract all reserved notional)
-            reserved = 0.0
+            # PHASE 3: Compute portfolio equity for strategy signals
+            current_prices = {sym: c[sym][i] for sym in symbols}
+            open_pnl_total = 0.0
             for sym in symbols:
                 for tr in positions.get(sym, []):
-                    reserved += tr.entry_price * tr.size
-            available_cash = max(0.0, cash - reserved)
+                    open_pnl_total += (c[sym][i] - tr.entry_price) * tr.side * tr.size
+            portfolio_equity = cash + open_pnl_total
 
             # PHASE 4: Call each strategy on its real bars
+            # Pass equity * weight so strategies can correctly track peak
+            # equity and drawdown. The Broker's buying power check prevents
+            # oversizing beyond what's actually deployable.
             for sym in symbols:
                 if not is_real[sym][i]:
                     continue
 
                 bar = Bar(ts[i], o[sym][i], h[sym][i], lo[sym][i], c[sym][i])
-                asset_cash = available_cash * current_weights.get(sym, 0.0)
+                asset_equity = portfolio_equity * current_weights.get(sym, 0.0)
 
                 li = local_idx[sym][i]
-                new_trade = strats[sym](li, bar, asset_cash)
+                new_trade = strats[sym](li, bar, asset_equity)
 
                 if new_trade is not None and new_trade.size > 0:
                     broker.open_trade(
@@ -262,12 +270,12 @@ class PortfolioBacktester:
                         entry_price=new_trade.entry_price,
                     )
                     cash = portfolio.cash
-                    # Recalculate available cash for remaining assets
-                    reserved = 0.0
+                    # Recalculate equity for remaining assets
+                    open_pnl_total = 0.0
                     for s2 in symbols:
                         for tr in positions.get(s2, []):
-                            reserved += tr.entry_price * tr.size
-                    available_cash = max(0.0, cash - reserved)
+                            open_pnl_total += (c[s2][i] - tr.entry_price) * tr.side * tr.size
+                    portfolio_equity = cash + open_pnl_total
 
             # PHASE 5: Compute portfolio equity
             current_prices = {sym: c[sym][i] for sym in symbols}

@@ -183,3 +183,59 @@ class TestStrategySignals:
         ), starting_cash=10_000)
         eq, _ = bt.run()
         assert eq[-1] > 0
+
+    def test_drawdown_guard_uses_equity_not_cash(self):
+        """The drawdown guard must track total equity (cash + open P&L),
+        not just available cash. This test verifies the guard triggers
+        at the correct equity level."""
+        # Scenario: enter long, price drops enough to push equity drawdown
+        # past the halt threshold, then recovers. If the guard incorrectly
+        # uses cash (which stays constant during an open position), it won't
+        # trigger at the right time.
+
+        # Use a strict 5% halt so the test is unambiguous
+        halt = 0.05
+
+        # Test risk_adjusted_size directly with equity vs cash semantics
+        # Peak equity = 10000, current equity = 9400 (6% drawdown > 5% halt)
+        assert risk_adjusted_size(
+            equity=9400, entry_price=100, stop_price=95,
+            risk_per_trade=0.02, peak_equity=10_000, max_dd_halt=halt,
+        ) == 0.0, "Guard should halt at 6% drawdown with 5% threshold"
+
+        # Peak equity = 10000, current equity = 9600 (4% drawdown < 5% halt)
+        size = risk_adjusted_size(
+            equity=9600, entry_price=100, stop_price=95,
+            risk_per_trade=0.02, peak_equity=10_000, max_dd_halt=halt,
+        )
+        assert size > 0, "Guard should allow trading at 4% drawdown with 5% threshold"
+
+        # Verify the strategy receives equity (not available_cash) from Backtester
+        # by running a backtest where the distinction matters
+        n = 60
+        # Uptrend then sharp drop
+        prices = np.concatenate([
+            np.linspace(100, 120, 30),  # Uptrend (triggers entries)
+            np.linspace(120, 100, 30),  # Drop (should trigger halt)
+        ])
+        df = pd.DataFrame({
+            "open": prices - 0.3, "high": prices + 0.5,
+            "low": prices - 0.5, "close": prices,
+        }, index=pd.date_range("2024-01-01", periods=n, freq="h"))
+
+        # Very aggressive risk with tight halt — maximizes the difference
+        # between cash-based and equity-based drawdown tracking
+        bt = Backtester(df, MomentumStrategy(
+            risk_per_trade=0.10, max_dd_halt=halt, cooldown_bars=1,
+            lookback=5, entry_threshold=0.02,
+        ), starting_cash=10_000)
+        eq, trades = bt.run()
+
+        # The equity curve should never go below (1 - halt) * peak
+        # (within a small tolerance for execution costs)
+        peak = np.maximum.accumulate(eq)
+        min_allowed = peak * (1 - halt - 0.05)  # 5% tolerance for slippage
+        assert np.all(eq >= min_allowed), (
+            f"Equity dropped below halt threshold: "
+            f"min equity {eq.min():.0f}, peak at that point {peak[eq.argmin()]:.0f}"
+        )

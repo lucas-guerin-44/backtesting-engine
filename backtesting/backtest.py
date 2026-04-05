@@ -20,6 +20,7 @@ import pandas as pd
 from backtesting.data import validate_ohlc
 from backtesting.portfolio import Portfolio
 from backtesting.types import Bar, Trade
+from utils import infer_freq_per_year
 
 
 class Backtester:
@@ -79,6 +80,9 @@ class Backtester:
         # __getitem__ boxing overhead per bar — was 46% of total runtime)
         self._ts = list(pd.DatetimeIndex(df.index))
         self.n = len(df)
+
+        # Infer annualization factor from the data's actual frequency
+        self.freq_per_year = infer_freq_per_year(self._ts)
 
         # Pre-allocate output array
         self.equity_curve = np.empty(self.n, dtype=np.float64)
@@ -156,8 +160,9 @@ class Backtester:
                 available_cash = cash
                 equity = cash
 
-            # Ask strategy for a new signal
-            new_trade = on_bar(i, bar, available_cash)
+            # Ask strategy for a new signal (pass equity so the strategy
+            # can correctly track peak equity and compute drawdown)
+            new_trade = on_bar(i, bar, equity)
 
             # Execute entry via Broker
             if new_trade is not None and new_trade.size > 0:

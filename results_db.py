@@ -131,6 +131,7 @@ class ResultsDB:
         commission_bps: float = 0.0,
         slippage_bps: float = 0.0,
         data_hash: str = "",
+        freq_per_year: int = 252,
     ) -> int:
         """Save a single backtest run. Returns the run_id."""
         equity_curve = np.asarray(equity_curve, dtype=np.float64)
@@ -138,7 +139,7 @@ class ResultsDB:
         # Compute metrics
         final_eq = float(equity_curve[-1]) if len(equity_curve) > 0 else starting_cash
         pct_return = (final_eq - starting_cash) / starting_cash * 100
-        sharpe = compute_sharpe(equity_curve)
+        sharpe = compute_sharpe(equity_curve, freq_per_year=freq_per_year)
 
         peak = np.maximum.accumulate(equity_curve)
         dd = (peak - equity_curve) / np.where(peak > 0, peak, 1.0)

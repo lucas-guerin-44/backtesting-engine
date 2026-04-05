@@ -5,7 +5,9 @@ import math
 import numpy as np
 import pytest
 
-from utils import compute_sharpe, normalize_tf, sanitize
+import pandas as pd
+
+from utils import compute_sharpe, infer_freq_per_year, normalize_tf, sanitize
 
 
 class TestComputeSharpe:
@@ -34,6 +36,31 @@ class TestComputeSharpe:
         annualized = compute_sharpe(eq, annualize=True)
         raw = compute_sharpe(eq, annualize=False)
         assert abs(annualized) > abs(raw)
+
+
+class TestInferFreqPerYear:
+    def test_daily_bars(self):
+        ts = pd.date_range("2024-01-01", periods=100, freq="B")  # Business days
+        assert infer_freq_per_year(ts) == 252
+
+    def test_hourly_bars(self):
+        ts = pd.date_range("2024-01-01", periods=100, freq="h")
+        assert infer_freq_per_year(ts) == 6_570
+
+    def test_5min_bars(self):
+        ts = pd.date_range("2024-01-01", periods=100, freq="5min")
+        assert infer_freq_per_year(ts) == 105_120
+
+    def test_4h_bars(self):
+        ts = pd.date_range("2024-01-01", periods=100, freq="4h")
+        assert infer_freq_per_year(ts) == 1_643
+
+    def test_single_timestamp_returns_default(self):
+        ts = pd.DatetimeIndex(["2024-01-01"])
+        assert infer_freq_per_year(ts) == 252
+
+    def test_empty_returns_default(self):
+        assert infer_freq_per_year([]) == 252
 
 
 class TestNormalizeTf:

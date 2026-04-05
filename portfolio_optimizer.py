@@ -23,7 +23,7 @@ from backtesting.allocation import (
 )
 from backtesting.portfolio_backtest import PortfolioBacktester
 from optimizer import OBJECTIVES, _suggest_param
-from utils import compute_sharpe
+from utils import compute_sharpe, infer_freq_per_year
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -131,6 +131,8 @@ def portfolio_optimize(
 
     symbols = sorted(strategy_configs.keys())
     base_allocator = allocator or EqualWeightAllocator()
+    # Infer frequency from the first asset's timestamps
+    freq = infer_freq_per_year(dataframes[symbols[0]].index)
 
     def _objective(trial: optuna.Trial) -> float:
         try:
@@ -157,7 +159,7 @@ def portfolio_optimize(
                 vol_lookback=vol_lookback,
             )
             result = pbt.run()
-            score = obj_fn(result.equity_curve, result.trades)
+            score = obj_fn(result.equity_curve, result.trades, freq_per_year=freq)
             return score if np.isfinite(score) else -999.0
         except Exception as e:
             logger.warning(f"Trial {trial.number} failed: {e}")
@@ -230,6 +232,7 @@ def portfolio_walk_forward(
         raise ValueError(f"Unknown objective '{objective}'. Choose from: {list(OBJECTIVES)}")
 
     symbols = sorted(strategy_configs.keys())
+    freq = infer_freq_per_year(dataframes[symbols[0]].index)
 
     # Use union of all timestamps for splitting
     master_idx = dataframes[symbols[0]].index
@@ -313,7 +316,8 @@ def portfolio_walk_forward(
             vol_lookback=vol_lookback,
         )
         test_result = pbt.run()
-        oos_score = obj_fn(test_result.equity_curve, test_result.trades)
+        oos_score = obj_fn(test_result.equity_curve, test_result.trades,
+                           freq_per_year=freq)
 
         split_result = {
             "split": split_idx,
