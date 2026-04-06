@@ -22,7 +22,7 @@ from backtesting.allocation import (
     EqualWeightAllocator,
 )
 from backtesting.portfolio_backtest import PortfolioBacktester
-from optimizer import OBJECTIVES, _suggest_param
+from optimizer import OBJECTIVES, _suggest_param, _average_top_k_params
 from utils import compute_sharpe, infer_freq_per_year
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -103,6 +103,8 @@ def portfolio_optimize(
     vol_lookback: int = 60,
     optimize_weights: bool = False,
     n_jobs: int = 1,
+    min_trades: int = 0,
+    top_k_avg: int = 1,
 ) -> PortfolioOptimizationResult:
     """Optimize portfolio strategy parameters using Bayesian search.
 
@@ -160,7 +162,11 @@ def portfolio_optimize(
             )
             result = pbt.run()
             score = obj_fn(result.equity_curve, result.trades, freq_per_year=freq)
-            return score if np.isfinite(score) else -999.0
+            if not np.isfinite(score):
+                return -999.0
+            if min_trades > 0 and len(result.trades) < min_trades:
+                score = score * (len(result.trades) / min_trades)
+            return score
         except Exception as e:
             logger.warning(f"Trial {trial.number} failed: {e}")
             return -999.0
@@ -170,16 +176,29 @@ def portfolio_optimize(
     study.optimize(_objective, n_trials=n_trials, n_jobs=n_jobs)
 
     # Parse best params back into per-asset dicts
+    # Build a flat param_space with prefixed names for top-k averaging
+    if top_k_avg > 1:
+        flat_space = {}
+        for sym, config in sorted(strategy_configs.items()):
+            for name, bounds in config.param_space.items():
+                flat_space[f"{sym}__{name}"] = bounds
+        if optimize_weights:
+            for s in symbols:
+                flat_space[f"weight__{s}"] = (0.05, 1.0)
+        flat_params = _average_top_k_params(study, flat_space, top_k_avg)
+    else:
+        flat_params = study.best_params
+
     best_strategy_params: Dict[str, Dict[str, Any]] = {s: {} for s in symbols}
     best_weights = None
-    for key, val in study.best_params.items():
+    for key, val in flat_params.items():
         if key.startswith("weight__"):
             continue
         sym, param_name = key.split("__", 1)
         best_strategy_params[sym][param_name] = val
 
     if optimize_weights:
-        raw_w = {s: study.best_params.get(f"weight__{s}", 1.0) for s in symbols}
+        raw_w = {s: flat_params.get(f"weight__{s}", 1.0) for s in symbols}
         total = sum(raw_w.values())
         best_weights = {s: w / total for s, w in raw_w.items()}
 
@@ -217,6 +236,9 @@ def portfolio_walk_forward(
     vol_lookback: int = 60,
     optimize_weights: bool = False,
     n_jobs: int = 1,
+    min_trades: int = 0,
+    top_k_avg: int = 1,
+    anchored: bool = False,
 ) -> PortfolioWalkForwardResult:
     """Walk-forward validation at the portfolio level.
 
@@ -253,7 +275,7 @@ def portfolio_walk_forward(
         window_end = min(window_start + window_size, total_bars)
         split_point = window_start + int((window_end - window_start) * train_ratio)
 
-        train_start_ts = master_idx[window_start]
+        train_start_ts = master_idx[0] if anchored else master_idx[window_start]
         train_end_ts = master_idx[split_point - 1]
         test_start_ts = master_idx[split_point]
         test_end_ts = master_idx[window_end - 1]
@@ -290,6 +312,8 @@ def portfolio_walk_forward(
             vol_lookback=vol_lookback,
             optimize_weights=optimize_weights,
             n_jobs=n_jobs,
+            min_trades=min_trades,
+            top_k_avg=top_k_avg,
         )
 
         # 2. Evaluate best params on test data (out-of-sample)

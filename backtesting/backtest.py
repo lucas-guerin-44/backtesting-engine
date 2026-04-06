@@ -114,6 +114,7 @@ class Backtester:
         positions = broker.positions
         symbol = self.symbol
         on_bar = self.strategy.on_bar
+        manage_pos = self.strategy.manage_position
         equity_curve = self.equity_curve
         o, h, lo, c, ts = self._open, self._high, self._low, self._close, self._ts
         n = self.n
@@ -139,6 +140,10 @@ class Backtester:
             has_positions = open_pos is not None and len(open_pos) > 0
 
             if has_positions:
+                # Let strategy manage open positions (trailing stops, etc.)
+                for tr in open_pos:
+                    manage_pos(bar, tr)
+
                 # Process exits (gap-aware via Broker)
                 exit_first(symbol, bar)
                 exit_second(symbol, bar)

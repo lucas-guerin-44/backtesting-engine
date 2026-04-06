@@ -36,6 +36,7 @@ from strategies import (
     MomentumStrategy,
     TrendFollowingStrategy,
 )
+from ai_analyst import analyze_backtest
 from utils import compute_sharpe
 
 
@@ -78,6 +79,8 @@ def main():
     print(f"{'Strategy':<20s} {'Return':>8s} {'Max DD':>8s} {'Sharpe':>8s} {'Trades':>7s} {'Win %':>7s}")
     print("-" * 60)
 
+    analyst_metrics = {}
+
     for name, strat in strategies.items():
         bt = Backtester(df, strat, starting_cash=10_000,
                         commission_bps=5.0, slippage_bps=2.0, symbol="XAUUSD")
@@ -87,6 +90,12 @@ def main():
         win_rate = wins / len(trades) * 100 if trades else 0
         ret = (eq[-1] - 10_000) / 10_000 * 100
         sharpe = compute_sharpe(eq)
+
+        analyst_metrics[name] = {
+            "pct_return": ret, "sharpe": sharpe,
+            "max_drawdown": bt.max_drawdown * 100,
+            "total_trades": len(trades), "win_rate": win_rate,
+        }
 
         print(f"{name:<20s} {ret:>+7.2f}% {bt.max_drawdown*100:>7.2f}% {sharpe:>8.4f} {len(trades):>7d} {win_rate:>6.1f}%")
 
@@ -98,9 +107,9 @@ def main():
         "fast_period": (5, 40),
         "slow_period": (20, 100),
         "atr_stop_mult": (1.0, 5.0),
-        "atr_target_mult": (2.0, 8.0),
         "risk_per_trade": (0.01, 0.05),
     }
+    fixed_params = {"use_trailing_stop": True, "allow_reentry": True}
 
     print(f"Running 50 Optuna trials (Bayesian search)...")
     t0 = time.perf_counter()
@@ -108,6 +117,7 @@ def main():
         TrendFollowingStrategy, param_space, df,
         n_trials=50, objective="sharpe",
         commission_bps=5.0, slippage_bps=2.0,
+        fixed_params=fixed_params,
     )
     elapsed = time.perf_counter() - t0
 
@@ -116,6 +126,10 @@ def main():
     print(f"Best params:")
     for k, v in result.best_params.items():
         print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
+
+    analyst_metrics["Trend Following"]["optimization"] = {
+        "best_sharpe": result.best_score, "n_trials": 50,
+    }
 
     print(f"\nTop 5 trials:")
     print(result.all_trials.head(5).to_string(index=False))
@@ -132,6 +146,7 @@ def main():
         TrendFollowingStrategy, param_space, df,
         n_splits=3, train_ratio=0.7, n_trials=30,
         objective="sharpe", commission_bps=5.0, slippage_bps=2.0,
+        fixed_params=fixed_params,
     )
 
     print(wf.summary.to_string(index=False))
@@ -140,6 +155,11 @@ def main():
     print(f"Out-of-sample mean Sharpe:  {wf.out_of_sample_mean:>8.4f}  (the honest number)")
     print(f"Degradation:                {wf.degradation:>8.4f}  (IS - OOS, measures overfitting)")
     print()
+    analyst_metrics["Trend Following"]["walk_forward"] = {
+        "is_mean": wf.in_sample_mean, "oos_mean": wf.out_of_sample_mean,
+        "degradation": wf.degradation,
+    }
+
     if wf.degradation > 0.5:
         print("Verdict: Large degradation — the optimizer is curve-fitting, not finding real signal.")
     elif wf.out_of_sample_mean > 0:
@@ -154,7 +174,8 @@ def main():
     from backtesting.statistics import compute_statistical_report
 
     # Run the best strategy and check if the edge is real
-    bt = Backtester(df, TrendFollowingStrategy(), starting_cash=10_000,
+    bt = Backtester(df, TrendFollowingStrategy(
+        use_trailing_stop=True, allow_reentry=True), starting_cash=10_000,
                     commission_bps=5.0, slippage_bps=2.0, symbol="XAUUSD")
     eq, trades = bt.run()
 
@@ -170,9 +191,12 @@ def main():
     db_path = "exports/demo_results.db"
     os.makedirs("exports", exist_ok=True)
     with ResultsDB(db_path) as db:
-        for name, strat_cls in [("Trend Following", TrendFollowingStrategy),
-                                ("Momentum", MomentumStrategy)]:
-            strat = strat_cls()
+        for name, strat_cls, kwargs in [
+            ("Trend Following", TrendFollowingStrategy,
+             {"use_trailing_stop": True, "allow_reentry": True}),
+            ("Momentum", MomentumStrategy, {}),
+        ]:
+            strat = strat_cls(**kwargs)
             bt = Backtester(df, strat, starting_cash=10_000,
                             commission_bps=5.0, slippage_bps=2.0)
             eq, trades = bt.run()
@@ -196,7 +220,8 @@ def main():
     # Event-driven
     t0 = time.perf_counter()
     for _ in range(200):
-        Backtester(df, TrendFollowingStrategy(), starting_cash=10_000).run()
+        Backtester(df, TrendFollowingStrategy(
+            use_trailing_stop=True, allow_reentry=True), starting_cash=10_000).run()
     evt_time = (time.perf_counter() - t0) / 200
     evt_bps = len(df) / evt_time
 
@@ -215,7 +240,12 @@ def main():
     print()
     print(f"At vectorized speed, 1000 optimizer trials = ~{1000*vec_time:.0f}s")
 
-    print()
+    # ------------------------------------------------------------------
+    section("7. AI Analyst (if enabled)")
+    # ------------------------------------------------------------------
+
+    analyze_backtest(analyst_metrics)
+
     print("Done. See README.md for full documentation.")
 
 

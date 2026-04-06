@@ -207,6 +207,9 @@ cp .env.example .env
 | `DATALAKE_URL` | `http://127.0.0.1:8008` | OHLC datalake API endpoint |
 | `LOCAL_API_URL` | `http://127.0.0.1:8001` | Backtesting API URL |
 | `LOCAL_API_PORT` | `8001` | Port for the FastAPI server |
+| `AI_ANALYST` | `false` | Enable local LLM post-backtest analysis (requires [Ollama](https://ollama.com)) |
+| `AI_MODEL` | `llama3.2:3b` | Ollama model to use for analysis |
+| `OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama API endpoint |
 
 ### Quick Start
 
@@ -492,6 +495,19 @@ At vectorized speed, 1,000 Optuna trials on 3,000 bars completes in ~5 seconds.
 ```bash
 python -m pytest tests/ -v  # 192 tests in ~2.7s
 ```
+
+## AI Analyst
+
+Optional local LLM analysis after each backtest run. Uses [Ollama](https://ollama.com) to run a small model on your machine — no API keys, no cloud, no data leaves your computer.
+
+Enable it:
+```bash
+# .env
+AI_ANALYST=true
+AI_MODEL=llama3.2:3b   # or any Ollama model
+```
+
+The model is pulled automatically on first run. After backtests complete, the analyst prints a plain-English review covering performance, risk, overfitting signals, and concrete suggestions — referencing the actual numbers from your run.
 
 ## Known Limitations
 

@@ -134,3 +134,90 @@ class TestParallelOptimize:
         )
         assert 5 <= result.best_params["fast_period"] <= 30
         assert 20 <= result.best_params["slow_period"] <= 60
+
+
+class TestMinTrades:
+    def test_min_trades_penalizes_low_count(self, long_trending_df):
+        """With an unreachably high min_trades, all scores should be penalized."""
+        baseline = optimize(
+            TrendFollowingStrategy, PARAM_SPACE, long_trending_df,
+            n_trials=5, objective="sharpe", min_trades=0,
+        )
+        penalized = optimize(
+            TrendFollowingStrategy, PARAM_SPACE, long_trending_df,
+            n_trials=5, objective="sharpe", min_trades=9999,
+        )
+        # With extreme min_trades, best scores should be much lower
+        assert penalized.all_trials["score"].max() <= baseline.all_trials["score"].max()
+
+    def test_min_trades_zero_is_noop(self, long_trending_df):
+        result = optimize(
+            TrendFollowingStrategy, PARAM_SPACE, long_trending_df,
+            n_trials=3, objective="sharpe", min_trades=0,
+        )
+        assert isinstance(result, OptimizationResult)
+
+
+class TestTopKAvg:
+    def test_top_k_1_returns_best(self, long_trending_df):
+        result = optimize(
+            TrendFollowingStrategy, PARAM_SPACE, long_trending_df,
+            n_trials=5, objective="sharpe", top_k_avg=1,
+        )
+        assert isinstance(result, OptimizationResult)
+
+    def test_top_k_averages_params(self, long_trending_df):
+        result = optimize(
+            TrendFollowingStrategy, PARAM_SPACE, long_trending_df,
+            n_trials=10, objective="sharpe", top_k_avg=5,
+        )
+        # Averaged params should still be within bounds
+        assert 5 <= result.best_params["fast_period"] <= 30
+        assert 20 <= result.best_params["slow_period"] <= 60
+        assert 1.0 <= result.best_params["atr_stop_mult"] <= 4.0
+
+    def test_top_k_int_params_are_int(self, long_trending_df):
+        result = optimize(
+            TrendFollowingStrategy, PARAM_SPACE, long_trending_df,
+            n_trials=10, objective="sharpe", top_k_avg=5,
+        )
+        assert isinstance(result.best_params["fast_period"], int)
+        assert isinstance(result.best_params["slow_period"], int)
+
+    def test_top_k_larger_than_trials(self, long_trending_df):
+        """top_k_avg > n_trials should still work (uses all trials)."""
+        result = optimize(
+            TrendFollowingStrategy, PARAM_SPACE, long_trending_df,
+            n_trials=3, objective="sharpe", top_k_avg=100,
+        )
+        assert isinstance(result, OptimizationResult)
+
+
+class TestAnchoredWalkForward:
+    def test_anchored_training_starts_at_zero(self, long_trending_df):
+        result = walk_forward(
+            TrendFollowingStrategy, PARAM_SPACE, long_trending_df,
+            n_splits=2, n_trials=3, objective="sharpe", anchored=True,
+        )
+        first_date = str(long_trending_df.index[0].date())
+        for split in result.splits:
+            assert split["train_start"] == first_date
+
+    def test_anchored_false_has_rolling_windows(self, long_trending_df):
+        result = walk_forward(
+            TrendFollowingStrategy, PARAM_SPACE, long_trending_df,
+            n_splits=2, n_trials=3, objective="sharpe", anchored=False,
+        )
+        train_starts = [s["train_start"] for s in result.splits]
+        # Rolling windows should have different training start dates
+        assert len(set(train_starts)) > 1
+
+    def test_anchored_produces_valid_result(self, long_trending_df):
+        result = walk_forward(
+            TrendFollowingStrategy, PARAM_SPACE, long_trending_df,
+            n_splits=2, n_trials=3, objective="sharpe", anchored=True,
+        )
+        assert isinstance(result, WalkForwardResult)
+        assert len(result.splits) == 2
+        expected_deg = result.in_sample_mean - result.out_of_sample_mean
+        assert abs(result.degradation - expected_deg) < 0.01

@@ -136,6 +136,46 @@ def _suggest_param(trial: optuna.Trial, name: str, bounds) -> Any:
     return trial.suggest_float(name, float(low), float(high))
 
 
+def _average_top_k_params(
+    study: optuna.Study,
+    param_space: Dict[str, Any],
+    k: int,
+) -> Dict[str, Any]:
+    """Average the top K trials' parameters.
+
+    Integer params are rounded, float params are averaged,
+    categorical params use the mode (most frequent value).
+    """
+    completed = [t for t in study.trials
+                 if t.state == optuna.trial.TrialState.COMPLETE]
+    completed.sort(key=lambda t: t.value, reverse=True)
+    top_k = completed[:min(k, len(completed))]
+
+    if len(top_k) <= 1:
+        return study.best_params
+
+    averaged = {}
+    for name, bounds in param_space.items():
+        values = [t.params[name] for t in top_k if name in t.params]
+        if not values:
+            averaged[name] = study.best_params.get(name)
+            continue
+
+        if isinstance(bounds, list):
+            # Categorical: mode
+            from collections import Counter
+            averaged[name] = Counter(values).most_common(1)[0][0]
+        else:
+            low, high = bounds
+            avg = sum(values) / len(values)
+            if isinstance(low, int) and isinstance(high, int):
+                averaged[name] = round(avg)
+            else:
+                averaged[name] = avg
+
+    return averaged
+
+
 # ---------------------------------------------------------------------------
 # Core optimization
 # ---------------------------------------------------------------------------
@@ -172,6 +212,8 @@ def optimize(
     symbol: str = "default",
     fixed_params: Optional[Dict[str, Any]] = None,
     n_jobs: int = 1,
+    min_trades: int = 0,
+    top_k_avg: int = 1,
 ) -> OptimizationResult:
     """Optimize strategy parameters using Bayesian search (Optuna TPE).
 
@@ -223,7 +265,11 @@ def optimize(
                             symbol=symbol)
             equity_curve, trades = bt.run()
             score = obj_fn(equity_curve, trades, freq_per_year=freq)
-            return score if np.isfinite(score) else -999.0
+            if not np.isfinite(score):
+                return -999.0
+            if min_trades > 0 and len(trades) < min_trades:
+                score = score * (len(trades) / min_trades)
+            return score
         except Exception as e:
             logger.warning(f"Trial {trial.number} failed: {e}")
             return -999.0
@@ -239,8 +285,11 @@ def optimize(
             rows.append(row)
     trials_df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
 
+    best_params = (_average_top_k_params(study, param_space, top_k_avg)
+                   if top_k_avg > 1 else study.best_params)
+
     return OptimizationResult(
-        best_params=study.best_params,
+        best_params=best_params,
         best_score=study.best_value,
         objective_name=objective,
         n_trials=n_trials,
@@ -262,6 +311,9 @@ def walk_forward(
     symbol: str = "default",
     fixed_params: Optional[Dict[str, Any]] = None,
     n_jobs: int = 1,
+    min_trades: int = 0,
+    top_k_avg: int = 1,
+    anchored: bool = False,
 ) -> WalkForwardResult:
     """Walk-forward optimization: the only honest way to evaluate parameter tuning.
 
@@ -322,7 +374,8 @@ def walk_forward(
         window_end = min(window_start + window_size, total_bars)
         split_point = window_start + int((window_end - window_start) * train_ratio)
 
-        train_df = df.iloc[window_start:split_point]
+        train_start_idx = 0 if anchored else window_start
+        train_df = df.iloc[train_start_idx:split_point]
         test_df = df.iloc[split_point:window_end]
 
         if len(train_df) < 30 or len(test_df) < 10:
@@ -339,6 +392,7 @@ def walk_forward(
             n_trials=n_trials, objective=objective, starting_cash=starting_cash,
             commission_bps=commission_bps, slippage_bps=slippage_bps,
             symbol=symbol, fixed_params=fixed_params, n_jobs=n_jobs,
+            min_trades=min_trades, top_k_avg=top_k_avg,
         )
 
         # 2. Evaluate best params on test data (out-of-sample)

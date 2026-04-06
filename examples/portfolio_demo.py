@@ -37,6 +37,7 @@ from strategies import (
     MomentumStrategy,
     TrendFollowingStrategy,
 )
+from ai_analyst import analyze_portfolio
 from utils import compute_sharpe, fetch_ohlc
 
 
@@ -45,7 +46,7 @@ from utils import compute_sharpe, fetch_ohlc
 # ---------------------------------------------------------------------------
 
 INSTRUMENTS = [
-    "XAUUSD", "EURUSD", "BTCUSD", "SPX500",
+    "XAUUSD", "EURUSD", "SPX500",
     "NDX100", "GER40", "GBPUSD", "USOUSD",
 ]
 TIMEFRAME = "D1"
@@ -68,15 +69,18 @@ COSTS_BY_SYMBOL = {
 }
 
 # Map each instrument to a strategy that fits its asset class
+# Trend-following assets get trailing stop + re-entry enabled
+_TF_KWARGS = {"use_trailing_stop": True, "allow_reentry": True, "atr_stop_mult": 3.0}
+
 STRATEGY_MAP = {
-    "XAUUSD": ("Trend Following", TrendFollowingStrategy),
-    "BTCUSD": ("Momentum",        MomentumStrategy),
-    "USOUSD": ("Donchian",        DonchianBreakoutStrategy),
-    "SPX500": ("Trend Following", TrendFollowingStrategy),
-    "NDX100": ("Momentum",        MomentumStrategy),
-    "GER40":  ("Trend Following", TrendFollowingStrategy),
-    "EURUSD": ("Mean Reversion",  MeanReversionStrategy),
-    "GBPUSD": ("Mean Reversion",  MeanReversionStrategy),
+    "XAUUSD": ("Trend Following", TrendFollowingStrategy, _TF_KWARGS),
+    "BTCUSD": ("Momentum",        MomentumStrategy,       {}),
+    "USOUSD": ("Donchian",        DonchianBreakoutStrategy, {}),
+    "SPX500": ("Trend Following", TrendFollowingStrategy, _TF_KWARGS),
+    "NDX100": ("Momentum",        MomentumStrategy,       {}),
+    "GER40":  ("Trend Following", TrendFollowingStrategy, _TF_KWARGS),
+    "EURUSD": ("Mean Reversion",  MeanReversionStrategy,  {}),
+    "GBPUSD": ("Mean Reversion",  MeanReversionStrategy,  {}),
 }
 
 
@@ -131,8 +135,8 @@ def main():
     print("-" * 88)
 
     for sym in symbols:
-        strat_name, strat_cls = STRATEGY_MAP.get(sym, ("Trend Following", TrendFollowingStrategy))
-        strat = strat_cls()
+        strat_name, strat_cls, strat_kw = STRATEGY_MAP.get(sym, ("Trend Following", TrendFollowingStrategy, _TF_KWARGS))
+        strat = strat_cls(**strat_kw)
         bt = Backtester(
             dataframes[sym], strat, starting_cash=STARTING_CASH,
             commission_bps=COMMISSION_BPS, slippage_bps=SLIPPAGE_BPS,
@@ -203,12 +207,13 @@ def main():
     print(f"{'Buy & Hold':<16s} {bnh_portfolio:>+8.2f}%      -        -        -")
 
     portfolio_results = {}  # For charting
+    analyst_alloc_metrics = {}
 
     for alloc_name, allocator in allocators.items():
         strats = {}
         for sym in symbols:
-            _, strat_cls = STRATEGY_MAP.get(sym, ("Trend Following", TrendFollowingStrategy))
-            strats[sym] = strat_cls()
+            _, strat_cls, strat_kw = STRATEGY_MAP.get(sym, ("Trend Following", TrendFollowingStrategy, _TF_KWARGS))
+            strats[sym] = strat_cls(**strat_kw)
 
         pbt = PortfolioBacktester(
             dataframes=dataframes,
@@ -228,6 +233,15 @@ def main():
         ret = (result.equity_curve[-1] - STARTING_CASH) / STARTING_CASH * 100
         sharpe = compute_sharpe(result.equity_curve)
 
+        alloc_m = {
+            "pct_return": ret, "sharpe": sharpe,
+            "max_drawdown": pbt.max_drawdown * 100,
+            "total_trades": len(result.trades),
+        }
+        if result.allocation_history:
+            alloc_m["weights"] = result.allocation_history[-1]
+        analyst_alloc_metrics[alloc_name] = alloc_m
+
         print(f"{alloc_name:<16s} {ret:>+8.2f}% {pbt.max_drawdown*100:>7.2f}% "
               f"{sharpe:>8.4f} {len(result.trades):>7d}")
 
@@ -242,6 +256,8 @@ def main():
             reasons = Counter(s.reason for s in skips)
             reasons_str = ", ".join(f"{r}: {n}" for r, n in reasons.most_common())
             print(f"  Skipped: {len(skips)} trades ({reasons_str})")
+            
+        print(" ")
 
     # Save allocation comparison chart
     os.makedirs("docs", exist_ok=True)
@@ -261,13 +277,12 @@ def main():
 
     configs = {}
     for sym in opt_symbols:
-        _, strat_cls = STRATEGY_MAP.get(sym, ("Trend Following", TrendFollowingStrategy))
+        _, strat_cls, strat_kw = STRATEGY_MAP.get(sym, ("Trend Following", TrendFollowingStrategy, _TF_KWARGS))
         if strat_cls == TrendFollowingStrategy:
             space = {
                 "fast_period": (10, 40),
                 "slow_period": (30, 100),
                 "atr_stop_mult": (1.0, 4.0),
-                "atr_target_mult": (2.0, 6.0),
                 "risk_per_trade": (0.01, 0.04),
             }
         elif strat_cls == MeanReversionStrategy:
@@ -293,7 +308,8 @@ def main():
                 "risk_reward": (1.5, 4.0),
                 "risk_per_trade": (0.01, 0.04),
             }
-        configs[sym] = StrategyConfig(strategy_cls=strat_cls, param_space=space)
+        configs[sym] = StrategyConfig(strategy_cls=strat_cls, param_space=space,
+                                      fixed_params=strat_kw)
 
     strat_names = {s: STRATEGY_MAP.get(s, ("?",))[0] for s in opt_symbols}
     print(f"Optimizing {len(opt_symbols)} assets:")
@@ -362,7 +378,16 @@ def main():
     else:
         print(">> Negative OOS — no reliable portfolio edge detected.")
 
-    print()
+    # ------------------------------------------------------------------
+    section("5. AI Analyst (if enabled)")
+    # ------------------------------------------------------------------
+
+    analyst_wf = {
+        "is_mean": wf.in_sample_mean, "oos_mean": wf.out_of_sample_mean,
+        "degradation": wf.degradation,
+    }
+    analyze_portfolio(analyst_alloc_metrics, walk_forward=analyst_wf)
+
     print("Done.")
 
 

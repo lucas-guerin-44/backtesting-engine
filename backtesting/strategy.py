@@ -53,3 +53,18 @@ class Strategy(ABC):
             open), or None to skip.
         """
         ...
+
+    def manage_position(self, bar: Bar, trade: Trade) -> None:
+        """Called each bar for every open position. Override to implement
+        trailing stops or other position management.
+
+        The default implementation does nothing. Strategies that need to
+        update stops or take-profits on open trades should override this.
+
+        Parameters
+        ----------
+        bar : Bar
+            Current OHLC bar.
+        trade : Trade
+            The open trade to manage (stop_price can be mutated directly).
+        """

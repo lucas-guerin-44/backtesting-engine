@@ -258,6 +258,7 @@ class PortfolioBacktester:
         pending_trades: Dict[str, Trade] = {}
 
         # Local refs for speed
+        manage_fns = {sym: self.strategies[sym].manage_position for sym in symbols}
         strats = {sym: self.strategies[sym].on_bar for sym in symbols}
         o = self._open
         h = self._high
@@ -290,6 +291,9 @@ class PortfolioBacktester:
                     portfolio.slippage_bps = sym_costs["slippage_bps"]
 
                     bar = Bar(ts[i], o[sym][i], h[sym][i], lo[sym][i], c[sym][i])
+                    # Let strategy manage open positions (trailing stops, etc.)
+                    for tr in open_pos:
+                        manage_fns[sym](bar, tr)
                     exit_first(sym, bar)
                     exit_second(sym, bar)
                     # Attribute newly closed trades to this symbol and log exits
