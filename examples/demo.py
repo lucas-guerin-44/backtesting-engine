@@ -118,6 +118,7 @@ def main():
         n_trials=50, objective="sharpe",
         commission_bps=5.0, slippage_bps=2.0,
         fixed_params=fixed_params,
+        min_trades=10, top_k_avg=5,
     )
     elapsed = time.perf_counter() - t0
 
@@ -147,6 +148,7 @@ def main():
         n_splits=3, train_ratio=0.7, n_trials=30,
         objective="sharpe", commission_bps=5.0, slippage_bps=2.0,
         fixed_params=fixed_params,
+        min_trades=10, top_k_avg=5, anchored=True,
     )
 
     print(wf.summary.to_string(index=False))
