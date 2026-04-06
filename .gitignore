@@ -29,6 +29,7 @@ nul
 # Project artifacts
 exports/
 results.db
-ohlc_data/
+ohlc_data/*
+!ohlc_data/*_D1.csv
 artifacts/
 trade_charts/

@@ -210,6 +210,8 @@ cp .env.example .env
 
 ### Quick Start
 
+D1 (daily) OHLC data is included for 8 instruments: XAUUSD, EURUSD, BTCUSD, SPX500, NDX100, GER40, GBPUSD, USOUSD. Both demos work out of the box.
+
 Single-asset demo (backtests all strategies, optimizes, validates, runs statistical tests):
 ```bash
 python examples/demo.py

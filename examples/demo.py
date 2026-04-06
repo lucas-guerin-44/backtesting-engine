@@ -12,7 +12,7 @@ Run this to see the full workflow:
 Usage:
     python examples/demo.py
 
-Requires OHLC data in ohlc_data/XAUUSD_H1.csv (or any CSV with
+Requires OHLC data in ohlc_data/XAUUSD_D1.csv (or any CSV with
 timestamp, open, high, low, close columns).
 """
 
@@ -39,7 +39,7 @@ from strategies import (
 from utils import compute_sharpe
 
 
-def load_data(path="ohlc_data/XAUUSD_H1.csv"):
+def load_data(path="ohlc_data/XAUUSD_D1.csv"):
     """Load OHLC data from CSV."""
     if not os.path.exists(path):
         print(f"ERROR: {path} not found.")
@@ -61,7 +61,7 @@ def section(title):
 def main():
     df = load_data()
     print(f"Loaded {len(df)} bars: {df.index[0].date()} to {df.index[-1].date()}")
-    print(f"Instrument: XAUUSD H1")
+    print(f"Instrument: XAUUSD D1")
     print(f"Price range: {df['close'].min():.0f} - {df['close'].max():.0f}")
 
     # ------------------------------------------------------------------
