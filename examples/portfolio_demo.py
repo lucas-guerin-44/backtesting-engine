@@ -70,17 +70,19 @@ COSTS_BY_SYMBOL = {
 
 # Map each instrument to a strategy that fits its asset class
 # Trend-following assets get trailing stop + re-entry enabled
-_TF_KWARGS = {"use_trailing_stop": True, "allow_reentry": True, "atr_stop_mult": 3.0}
+_TF_KWARGS = {"use_trailing_stop": True, "allow_reentry": True, "atr_stop_mult": 3.0,
+              "trend_filter_period": 200}
+_FILTER_200 = {"trend_filter_period": 200}
 
 STRATEGY_MAP = {
     "XAUUSD": ("Trend Following", TrendFollowingStrategy, _TF_KWARGS),
-    "BTCUSD": ("Momentum",        MomentumStrategy,       {}),
-    "USOUSD": ("Donchian",        DonchianBreakoutStrategy, {}),
+    "BTCUSD": ("Momentum",        MomentumStrategy,       _FILTER_200),
+    "USOUSD": ("Donchian",        DonchianBreakoutStrategy, _FILTER_200),
     "SPX500": ("Trend Following", TrendFollowingStrategy, _TF_KWARGS),
-    "NDX100": ("Momentum",        MomentumStrategy,       {}),
+    "NDX100": ("Momentum",        MomentumStrategy,       _FILTER_200),
     "GER40":  ("Trend Following", TrendFollowingStrategy, _TF_KWARGS),
-    "EURUSD": ("Mean Reversion",  MeanReversionStrategy,  {}),
-    "GBPUSD": ("Mean Reversion",  MeanReversionStrategy,  {}),
+    "EURUSD": ("Mean Reversion",  MeanReversionStrategy,  _FILTER_200),
+    "GBPUSD": ("Mean Reversion",  MeanReversionStrategy,  _FILTER_200),
 }
 
 
