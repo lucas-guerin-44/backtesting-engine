@@ -27,6 +27,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backtesting.backtest import Backtester
+from backtesting.plot import plot_strategy_comparison
 from backtesting.vectorized import VectorizedBacktester
 from backtesting.vectorized_signals import trend_following_signals
 from optimizer import optimize, walk_forward
@@ -69,22 +70,27 @@ def main():
     section("1. Backtest All Strategies")
     # ------------------------------------------------------------------
 
+    _tf_kw = {"use_trailing_stop": True, "allow_reentry": True,
+              "atr_stop_mult": 3.0, "trend_filter_period": 200}
+    _f200 = {"trend_filter_period": 200}
     strategies = {
-        "Trend Following": TrendFollowingStrategy(),
-        "Mean Reversion": MeanReversionStrategy(),
-        "Momentum": MomentumStrategy(),
-        "Donchian Breakout": DonchianBreakoutStrategy(),
+        "Trend Following": TrendFollowingStrategy(**_tf_kw),
+        "Mean Reversion": MeanReversionStrategy(**_f200),
+        "Momentum": MomentumStrategy(**_f200),
+        "Donchian Breakout": DonchianBreakoutStrategy(**_f200),
     }
 
     print(f"{'Strategy':<20s} {'Return':>8s} {'Max DD':>8s} {'Sharpe':>8s} {'Trades':>7s} {'Win %':>7s}")
     print("-" * 60)
 
     analyst_metrics = {}
+    equity_curves = {}
 
     for name, strat in strategies.items():
         bt = Backtester(df, strat, starting_cash=10_000,
                         commission_bps=5.0, slippage_bps=2.0, symbol="XAUUSD")
         eq, trades = bt.run()
+        equity_curves[name] = eq
 
         wins = len([t for t in trades if t.pnl and t.pnl > 0])
         win_rate = wins / len(trades) * 100 if trades else 0
@@ -98,6 +104,9 @@ def main():
         }
 
         print(f"{name:<20s} {ret:>+7.2f}% {bt.max_drawdown*100:>7.2f}% {sharpe:>8.4f} {len(trades):>7d} {win_rate:>6.1f}%")
+
+    os.makedirs("docs", exist_ok=True)
+    plot_strategy_comparison(equity_curves, save_path="docs/strategy_comparison.png", show=False)
 
     # ------------------------------------------------------------------
     section("2. Parameter Optimization (Trend Following)")

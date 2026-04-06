@@ -7,7 +7,7 @@ A multi-asset, event-driven backtesting engine for evaluating trading strategies
 Built with Python. Data sourced from [lucas-guerin-44/datalake-api](https://github.com/lucas-guerin-44/datalake-api).
 
 ![Strategy Comparison](docs/strategy_comparison.png)
-*Equity curves for all four strategies on XAUUSD H1 with 5bps commission and 2bps slippage.*
+*Equity curves for all four strategies on XAUUSD H1 with 5bps commission and 2bps slippage. - very likely overfit*
 
 ## What This Does
 
