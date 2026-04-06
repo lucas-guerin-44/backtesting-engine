@@ -81,7 +81,7 @@ All strategies share a common risk model:
 ## Multi-Asset Portfolio Backtesting
 
 ![Portfolio Allocation Comparison](docs/portfolio_allocation.png)
-*8 instruments (XAUUSD, EURUSD, BTCUSD, SPX500, NDX100, GER40, GBPUSD, USOUSD) on D1 with mixed strategies per asset class.*
+*7 instruments (XAUUSD, EURUSD, SPX500, NDX100, GER40, GBPUSD, USOUSD) on D1 with mixed strategies per asset class.*
 
 The `PortfolioBacktester` runs multiple strategies on multiple assets with shared cash and risk management.
 
