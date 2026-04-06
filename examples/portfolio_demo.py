@@ -171,7 +171,7 @@ def main():
     allocators = {
         "Equal Weight": EqualWeightAllocator(),
         "Risk Parity": RiskParityAllocator(min_lookback=60),
-        "Corr-Aware": CorrelationAwareAllocator(min_lookback=60),
+        "Corr-Aware": CorrelationAwareAllocator(min_lookback=60, corr_threshold=0.4),
         "Regime-Aware": RegimeAllocator(
             trend_symbols=trend_syms,
             reversion_symbols=revert_syms,
@@ -224,7 +224,7 @@ def main():
             starting_cash=STARTING_CASH,
             commission_bps=COMMISSION_BPS,
             slippage_bps=SLIPPAGE_BPS,
-            rebalance_frequency=500,
+            rebalance_frequency=21,
             vol_lookback=500,
             risk_limits=limits,
             costs_by_symbol=COSTS_BY_SYMBOL,
@@ -329,8 +329,10 @@ def main():
         starting_cash=STARTING_CASH,
         commission_bps=COMMISSION_BPS,
         slippage_bps=SLIPPAGE_BPS,
-        rebalance_frequency=500,
+        rebalance_frequency=21,
         vol_lookback=500,
+        min_trades=10,
+        top_k_avg=5,
     )
     elapsed = time.perf_counter() - t0
 
@@ -363,8 +365,11 @@ def main():
         starting_cash=STARTING_CASH,
         commission_bps=COMMISSION_BPS,
         slippage_bps=SLIPPAGE_BPS,
-        rebalance_frequency=500,
+        rebalance_frequency=21,
         vol_lookback=500,
+        min_trades=10,
+        top_k_avg=5,
+        anchored=True,
     )
 
     print(wf.summary.to_string(index=False))

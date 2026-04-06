@@ -106,8 +106,9 @@ class CorrelationAwareAllocator(Allocator):
     Falls back to risk parity with fewer than 2 assets or insufficient data.
     """
 
-    def __init__(self, min_lookback: int = 30):
+    def __init__(self, min_lookback: int = 30, corr_threshold: float = 1.0):
         self.min_lookback = min_lookback
+        self.corr_threshold = corr_threshold
 
     def compute_weights(self, symbols, close_arrays, lookback, current_idx):
         n = len(symbols)
@@ -145,17 +146,25 @@ class CorrelationAwareAllocator(Allocator):
         rp_result = RiskParityAllocator(self.min_lookback).compute_weights(
             symbols, close_arrays, lookback, current_idx)
 
-        # Compute correlation scaling factor for each asset
+        # Compute correlation scaling factor for each asset.
+        # When corr_threshold < 1.0, assets whose average pairwise
+        # correlation exceeds the threshold get their weight zeroed out.
         corr_factors = {}
         for i, sym in enumerate(symbols):
             avg_abs_corr = np.mean([
                 abs(corr_matrix[i, j]) for j in range(n) if j != i
             ])
-            corr_factors[sym] = 1.0 / max(avg_abs_corr, 0.1)
+            if avg_abs_corr > self.corr_threshold:
+                corr_factors[sym] = 0.0
+            else:
+                corr_factors[sym] = 1.0 / max(avg_abs_corr, 0.1)
 
         # Apply factor and renormalize
         raw = {s: rp_result.weights[s] * corr_factors[s] for s in symbols}
         total = sum(raw.values())
+        if total <= 0:
+            # All assets above threshold — fall back to risk parity
+            return rp_result
         w = {s: v / total for s, v in raw.items()}
         return AllocationWeights(weights=w, method="correlation_aware")
 
