@@ -25,7 +25,7 @@ import pandas as pd
 from backtesting.allocation import Allocator, AllocationWeights, EqualWeightAllocator
 from backtesting.data import validate_ohlc
 from backtesting.portfolio import Portfolio
-from backtesting.types import Bar, Trade
+from backtesting.types import BacktestConfig, Bar, Trade
 from utils import infer_freq_per_year
 
 
@@ -121,6 +121,7 @@ class PortfolioBacktester:
         dataframes: Dict[str, pd.DataFrame],
         strategies: Dict[str, "Strategy"],
         allocator: Optional[Allocator] = None,
+        config: BacktestConfig = None,
         starting_cash: float = 10_000,
         commission_bps: float = 0.0,
         slippage_bps: float = 0.0,
@@ -131,6 +132,13 @@ class PortfolioBacktester:
         risk_limits: Optional[RiskLimits] = None,
         costs_by_symbol: Optional[Dict[str, Dict[str, float]]] = None,
     ):
+        if config is not None:
+            starting_cash = config.starting_cash
+            commission_bps = config.commission_bps
+            slippage_bps = config.slippage_bps
+            max_leverage = config.max_leverage
+            margin_rate = config.margin_rate
+
         if set(dataframes.keys()) != set(strategies.keys()):
             raise ValueError("dataframes and strategies must have the same keys")
         if not dataframes:

@@ -19,7 +19,7 @@ import pandas as pd
 
 from backtesting.data import validate_ohlc
 from backtesting.portfolio import Portfolio
-from backtesting.types import Bar, Trade
+from backtesting.types import BacktestConfig, Bar, Trade
 from utils import infer_freq_per_year
 
 
@@ -33,9 +33,12 @@ class Backtester:
     df : pd.DataFrame
         OHLC DataFrame indexed by timestamp with columns: open, high, low, close.
     strategy : object
-        Any object implementing ``on_bar(i, bar, cash) -> Optional[Trade]``.
+        Any object implementing ``on_bar(i, bar, equity) -> Optional[Trade]``.
+    config : BacktestConfig, optional
+        Shared configuration (cash, commission, slippage, leverage, margin).
+        If provided, individual kwargs are ignored.
     starting_cash : float
-        Initial portfolio cash.
+        Initial portfolio cash (ignored if ``config`` is provided).
     commission_bps : float
         Commission in basis points applied on entry and exit.
     slippage_bps : float
@@ -49,10 +52,19 @@ class Backtester:
         Instrument identifier used to key positions in the Broker.
     """
 
-    def __init__(self, df: pd.DataFrame, strategy, starting_cash: float = 10_000,
+    def __init__(self, df: pd.DataFrame, strategy,
+                 config: BacktestConfig = None,
+                 starting_cash: float = 10_000,
                  commission_bps: float = 0.0, slippage_bps: float = 0.0,
                  max_leverage: float = 1.0, margin_rate: float = 0.0,
                  symbol: str = "default"):
+        if config is not None:
+            starting_cash = config.starting_cash
+            commission_bps = config.commission_bps
+            slippage_bps = config.slippage_bps
+            max_leverage = config.max_leverage
+            margin_rate = config.margin_rate
+
         self.strategy = strategy
         self.starting_cash = starting_cash
         self.symbol = symbol

@@ -18,6 +18,20 @@ class Bar:
 
 
 @dataclass
+class BacktestConfig:
+    """Shared configuration for single-asset and portfolio backtesters.
+
+    Consolidates parameters that are common to both ``Backtester`` and
+    ``PortfolioBacktester`` into a single reusable object.
+    """
+    starting_cash: float = 10_000
+    commission_bps: float = 0.0
+    slippage_bps: float = 0.0
+    max_leverage: float = 1.0
+    margin_rate: float = 0.0
+
+
+@dataclass
 class Trade:
     """Represents a trade from entry through (optional) exit."""
     entry_bar: Bar
