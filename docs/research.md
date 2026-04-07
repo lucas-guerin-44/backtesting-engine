@@ -1,5 +1,7 @@
 # From Backtester to Signal: A Walk-Forward Research Process
 
+This is primarily a software engineering project. The quant methodology is best-effort: I've tried to flag where it falls short rather than pretend otherwise.
+
 How I went from "every strategy looks overfit" to understanding what's real and what isn't, and what I learned about the difference between optimizing and actually discovering signal.
 
 ## The Starting Point
@@ -139,5 +141,3 @@ In order of impact:
 - **Costs are underestimated.** Fixed 2-5 bps slippage doesn't reflect the reality that breakout/momentum entries happen during volatility spikes when spreads are wider. No overnight funding costs are modeled.
 - **Three walk-forward splits is not a large sample.** The OOS averages have wide confidence intervals. Three data points can't prove much statistically.
 - **The statistical tests have assumptions that don't fully hold.** The bootstrap assumes returns are independent (they're not — volatility clusters). The walk-forward has no gap between training and test windows, so there's some leakage at the boundary. These are known issues I haven't addressed in the implementation.
-
-This is primarily a software engineering project. The quant methodology is best-effort — I've tried to flag where it falls short rather than pretend otherwise.
