@@ -191,7 +191,8 @@ def cy_ema_array(np.ndarray[np.float64_t, ndim=1] prices, int period):
     for i in range(1, n):
         out[i] = alpha * prices[i] + one_minus_alpha * out[i - 1]
 
-    for i in range(period - 1):
+    cdef int nan_limit = min(period - 1, n)
+    for i in range(nan_limit):
         out[i] = np.nan
 
     return out
@@ -223,7 +224,8 @@ def cy_atr_array(
             tr = lc
         out[i] = alpha * tr + one_minus_alpha * out[i - 1]
 
-    for i in range(period - 1):
+    cdef int nan_limit = min(period - 1, n)
+    for i in range(nan_limit):
         out[i] = np.nan
 
     return out

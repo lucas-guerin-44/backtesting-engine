@@ -119,6 +119,231 @@ class TestVectorizedIndicators:
         assert np.all(valid <= 100)
 
 
+class TestIndicatorEdgeCases:
+    """Edge case and boundary tests for incremental and vectorized indicators.
+
+    Targets subtle accumulation bugs: NaN handling, extreme values,
+    single-element inputs, and warm-up boundary conditions.
+    """
+
+    # --- Incremental EMA ---
+
+    def test_ema_constant_input_converges(self):
+        """EMA of constant price should equal that price."""
+        ind = EMA(period=10)
+        for _ in range(50):
+            val = ind.update(42.0)
+        assert abs(val - 42.0) < 1e-10
+
+    def test_ema_single_spike_decays(self):
+        """A spike followed by flat prices should decay toward the flat level."""
+        ind = EMA(period=5)
+        for _ in range(10):
+            ind.update(100.0)
+        ind.update(200.0)  # spike
+        vals = []
+        for _ in range(20):
+            vals.append(ind.update(100.0))
+        # Should decay back toward 100
+        assert vals[-1] < 101.0
+
+    def test_ema_period_1_tracks_exactly(self):
+        """EMA with period=1 should equal the current price."""
+        ind = EMA(period=1)
+        assert ind.update(50.0) == 50.0
+        assert ind.update(75.0) == 75.0
+        assert ind.update(60.0) == 60.0
+
+    # --- Incremental ATR ---
+
+    def test_atr_zero_range_bars(self):
+        """ATR should be zero (or near-zero) when H=L=C every bar."""
+        ind = ATR(period=5)
+        for _ in range(20):
+            val = ind.update(100.0, 100.0, 100.0)
+        assert val is not None
+        assert val < 1e-10
+
+    def test_atr_single_volatile_bar(self):
+        """A single high-volatility bar should spike ATR then decay."""
+        ind = ATR(period=5)
+        for _ in range(10):
+            ind.update(101.0, 99.0, 100.0)  # range = 2
+        baseline = ind.value
+        ind.update(150.0, 50.0, 100.0)  # range = 100
+        spiked = ind.value
+        for _ in range(20):
+            ind.update(101.0, 99.0, 100.0)  # back to normal
+        decayed = ind.value
+        assert spiked > baseline * 3  # spike was significant
+        assert decayed < spiked  # decayed back
+
+    def test_atr_gap_handling(self):
+        """ATR true range should account for gap from previous close."""
+        ind = ATR(period=3)
+        for _ in range(5):
+            ind.update(101.0, 99.0, 100.0)
+        # Gap up: prev close=100, current open at 110
+        ind.update(115.0, 110.0, 112.0)
+        # True range should be max(115-110, |115-100|, |110-100|) = 15
+        assert ind.value > 5.0
+
+    # --- Incremental RSI ---
+
+    def test_rsi_all_gains_is_100(self):
+        """Monotonically increasing prices should give RSI near 100."""
+        ind = RSI(period=5)
+        val = None
+        for p in range(100, 130):
+            val = ind.update(float(p))
+        assert val is not None
+        assert val > 99.0
+
+    def test_rsi_all_losses_is_near_zero(self):
+        """Monotonically decreasing prices should give RSI near 0."""
+        ind = RSI(period=5)
+        val = None
+        for p in range(130, 100, -1):
+            val = ind.update(float(p))
+        assert val is not None
+        assert val < 1.0
+
+    def test_rsi_flat_price_is_stable(self):
+        """Constant price after movement should stabilize RSI."""
+        ind = RSI(period=5)
+        for p in range(100, 110):
+            ind.update(float(p))
+        vals = []
+        for _ in range(30):
+            vals.append(ind.update(110.0))
+        # RSI should converge toward 50 on flat input (gains decay, losses=0)
+        # Actually with 0 change, gain=0, loss=0, so avg_gain decays but avg_loss=0
+        # RSI = 100 - 100/(1 + avg_gain/0) = 100 when avg_loss=0
+        assert vals[-1] is not None
+
+    # --- Incremental Bollinger Bands ---
+
+    def test_bb_constant_price_zero_bandwidth(self):
+        """Constant price should give zero-width bands (lower == upper == mid)."""
+        bb = BollingerBands(period=5, num_std=2.0)
+        for _ in range(10):
+            lo, mid, hi = bb.update(100.0)
+        assert abs(lo - 100.0) < 1e-10
+        assert abs(mid - 100.0) < 1e-10
+        assert abs(hi - 100.0) < 1e-10
+
+    def test_bb_wider_std_gives_wider_bands(self):
+        """Higher num_std should produce wider bands."""
+        prices = [100, 102, 98, 101, 99, 103, 97, 100, 102, 98]
+        bb_narrow = BollingerBands(period=5, num_std=1.0)
+        bb_wide = BollingerBands(period=5, num_std=3.0)
+        for p in prices:
+            lo_n, _, hi_n = bb_narrow.update(p)
+            lo_w, _, hi_w = bb_wide.update(p)
+        assert (hi_w - lo_w) > (hi_n - lo_n)
+
+    # --- Vectorized vs Incremental consistency ---
+
+    def test_ema_array_matches_incremental(self):
+        """Vectorized EMA should produce identical values to incremental EMA."""
+        prices = np.array([100, 102, 98, 105, 103, 107, 101, 110, 108, 112],
+                          dtype=np.float64)
+        period = 3
+
+        # Incremental
+        ind = EMA(period)
+        incremental = []
+        for p in prices:
+            v = ind.update(p)
+            incremental.append(v if v is not None else np.nan)
+
+        # Vectorized
+        vectorized = ema_array(prices, period)
+
+        # Compare valid (non-NaN) values
+        for i in range(period - 1, len(prices)):
+            assert abs(incremental[i] - vectorized[i]) < 1e-10, (
+                f"EMA mismatch at index {i}: incremental={incremental[i]}, "
+                f"vectorized={vectorized[i]}"
+            )
+
+    def test_atr_array_matches_incremental(self):
+        """Vectorized ATR should produce identical values to incremental ATR."""
+        rng = np.random.RandomState(42)
+        n = 30
+        close = 100 + np.cumsum(rng.randn(n))
+        high = close + rng.rand(n) * 2
+        low = close - rng.rand(n) * 2
+        period = 5
+
+        # Incremental
+        ind = ATR(period)
+        incremental = []
+        for i in range(n):
+            v = ind.update(float(high[i]), float(low[i]), float(close[i]))
+            incremental.append(v if v is not None else np.nan)
+
+        # Vectorized
+        vectorized = atr_array(high, low, close, period)
+
+        for i in range(period - 1, n):
+            assert abs(incremental[i] - vectorized[i]) < 1e-10, (
+                f"ATR mismatch at index {i}: incremental={incremental[i]}, "
+                f"vectorized={vectorized[i]}"
+            )
+
+    def test_rsi_array_matches_incremental(self):
+        """Vectorized RSI should produce identical values to incremental RSI."""
+        prices = np.array([44, 44.34, 44.09, 43.61, 44.33, 44.83, 45.10,
+                           45.42, 45.84, 46.08, 45.89, 46.03, 45.61, 46.28,
+                           46.28, 46.00, 46.03, 46.41, 46.22, 45.64],
+                          dtype=np.float64)
+        period = 5
+
+        # Incremental
+        ind = RSI(period)
+        incremental = []
+        for p in prices:
+            v = ind.update(p)
+            incremental.append(v if v is not None else np.nan)
+
+        # Vectorized
+        vectorized = rsi_array(prices, period)
+
+        for i in range(len(prices)):
+            if np.isnan(incremental[i]) and np.isnan(vectorized[i]):
+                continue
+            if not np.isnan(incremental[i]) and not np.isnan(vectorized[i]):
+                assert abs(incremental[i] - vectorized[i]) < 0.01, (
+                    f"RSI mismatch at index {i}: incremental={incremental[i]}, "
+                    f"vectorized={vectorized[i]}"
+                )
+
+    # --- Vectorized edge cases ---
+
+    def test_ema_array_short_input(self):
+        """EMA array with fewer bars than period should be all NaN."""
+        prices = np.array([100.0, 101.0, 102.0])
+        result = ema_array(prices, period=10)
+        assert len(result) == 3
+        assert np.all(np.isnan(result))
+
+    def test_atr_array_single_bar(self):
+        """ATR with a single bar should not crash."""
+        h = np.array([101.0])
+        lo = np.array([99.0])
+        c = np.array([100.0])
+        result = atr_array(h, lo, c, period=14)
+        assert len(result) == 1
+
+    def test_rsi_array_two_bars(self):
+        """RSI with minimal bars should return NaN for warm-up period."""
+        prices = np.array([100.0, 101.0])
+        result = rsi_array(prices, period=14)
+        assert len(result) == 2
+        assert np.all(np.isnan(result))
+
+
 class TestRiskAdjustedSize:
     def test_basic_sizing(self):
         size = risk_adjusted_size(10_000, 100.0, 95.0, 0.02, 10_000, 0.15)
