@@ -11,12 +11,12 @@ Built with Python. Data sourced from [lucas-guerin-44/datalake-api](https://gith
 
 ## Features
 
-- **Three execution tiers**: event-driven (~300k bars/sec), vectorized (~700k bars/sec), and Cython-accelerated (~27M bars/sec). Optional C extension accelerates indicator computation (EMA, ATR, RSI) and trade chaining — 1,000 optimizer trials in ~8s vs ~29s pure Python
+- **Three execution tiers**: event-driven (~300k bars/sec), vectorized (~700k bars/sec), and Cython-accelerated (~27M bars/sec). Optional C extension accelerates indicator computation (EMA, ATR, RSI) and trade chaining, 1,000 optimizer trials in ~8s vs ~29s pure Python
 - **Gap-aware stops**: if price gaps past a stop level, fills at the open (worse price), not the stop
 - **Multi-asset portfolios**: shared cash, cross-asset risk limits, 4 allocation schemes (equal weight, risk parity, correlation-aware, regime-aware)
 - **Bayesian optimization**: Optuna TPE with walk-forward validation and parameter constraints
 - **Statistical testing**: bootstrap CI, permutation test, Deflated Sharpe Ratio (Bailey & Lopez de Prado 2014)
-- **213 tests** across 14 modules in ~3s — includes cross-engine consistency checks (event-driven vs vectorized produce equivalent results) and walk-forward contamination regression tests (proves OOS data never leaks into training). Reproducible benchmark script in `benchmarks/`
+- **213 tests** across 14 modules in ~3s, includes cross-engine consistency checks (event-driven vs vectorized produce equivalent results) and walk-forward contamination regression tests (proves OOS data never leaks into training). Reproducible benchmark script in `benchmarks/`
 
 ## Architecture
 
@@ -59,7 +59,7 @@ Built with Python. Data sourced from [lucas-guerin-44/datalake-api](https://gith
 └─────────────────────────────────────────────────────┘
 ```
 
-Strategies extend `Strategy` and implement `on_bar(i, bar, equity) -> Optional[Trade]`. The `Backtester` delegates execution to the `Broker` (gap-aware stops, slippage, commission) and tracking to the `Portfolio` (equity, drawdown, margin calls). The `PortfolioBacktester` extends this to multiple assets with shared cash, allocation weights, and cross-asset risk management — exits for all assets are processed before any new entries, preventing cash race conditions.
+Strategies extend `Strategy` and implement `on_bar(i, bar, equity) -> Optional[Trade]`. The `Backtester` delegates execution to the `Broker` (gap-aware stops, slippage, commission) and tracking to the `Portfolio` (equity, drawdown, margin calls). The `PortfolioBacktester` extends this to multiple assets with shared cash, allocation weights, and cross-asset risk management, exits for all assets are processed before any new entries, preventing cash race conditions.
 
 ## Quick Start
 
@@ -208,4 +208,4 @@ See [docs/research.md](docs/research.md) for a write-up of the research process:
 
 - **Flat slippage model.** Fixed basis-point cost regardless of order size or liquidity.
 - **No funding costs.** No overnight financing simulation for leveraged or multi-day positions.
-- **No calendar awareness.** All bars are treated as equal — no weekends, holidays, or trading sessions.
+- **No calendar awareness.** All bars are treated as equal, no weekends, holidays, or trading sessions.
