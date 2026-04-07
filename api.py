@@ -12,7 +12,8 @@ from pydantic import BaseModel
 
 from backtesting.backtest import Backtester
 from strategy_registry import STRATEGY_REGISTRY, get_strategy_param_space
-from utils import compute_sharpe, fetch_ohlc, sanitize
+from backtesting.statistics import compute_sharpe
+from utils import fetch_ohlc, sanitize
 
 app = FastAPI(title="Backtesting API")
 

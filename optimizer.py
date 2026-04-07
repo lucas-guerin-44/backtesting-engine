@@ -51,7 +51,8 @@ import optuna
 import pandas as pd
 
 from backtesting.backtest import Backtester
-from utils import compute_sharpe, infer_freq_per_year
+from backtesting.statistics import compute_sharpe
+from utils import infer_freq_per_year
 
 # Suppress Optuna's verbose trial logging (we log summaries ourselves)
 optuna.logging.set_verbosity(optuna.logging.WARNING)

@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from utils import compute_sharpe
+from backtesting.statistics import compute_sharpe
 
 
 @dataclass

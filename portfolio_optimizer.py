@@ -23,7 +23,8 @@ from backtesting.allocation import (
 )
 from backtesting.portfolio_backtest import PortfolioBacktester
 from optimizer import OBJECTIVES, _suggest_param, _average_top_k_params, _check_constraints
-from utils import compute_sharpe, infer_freq_per_year
+from backtesting.statistics import compute_sharpe
+from utils import infer_freq_per_year
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 logger = logging.getLogger(__name__)

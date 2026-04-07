@@ -37,8 +37,8 @@ from strategies import (
     MomentumStrategy,
     TrendFollowingStrategy,
 )
-from ai_analyst import analyze_portfolio
-from utils import compute_sharpe, fetch_ohlc
+from backtesting.statistics import compute_sharpe
+from utils import fetch_ohlc
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +212,6 @@ def main():
     print(f"{'Buy & Hold':<16s} {bnh_portfolio:>+8.2f}%      -        -        -")
 
     portfolio_results = {}  # For charting
-    analyst_alloc_metrics = {}
 
     for alloc_name, allocator in allocators.items():
         strats = {}
@@ -237,15 +236,6 @@ def main():
 
         ret = (result.equity_curve[-1] - STARTING_CASH) / STARTING_CASH * 100
         sharpe = compute_sharpe(result.equity_curve)
-
-        alloc_m = {
-            "pct_return": ret, "sharpe": sharpe,
-            "max_drawdown": pbt.max_drawdown * 100,
-            "total_trades": len(result.trades),
-        }
-        if result.allocation_history:
-            alloc_m["weights"] = result.allocation_history[-1]
-        analyst_alloc_metrics[alloc_name] = alloc_m
 
         print(f"{alloc_name:<16s} {ret:>+8.2f}% {pbt.max_drawdown*100:>7.2f}% "
               f"{sharpe:>8.4f} {len(result.trades):>7d}")
@@ -528,14 +518,6 @@ def main():
         print(">> Positive OOS — there may be a real portfolio-level edge.")
     else:
         print(">> Negative OOS — no reliable portfolio edge detected.")
-
-    analyst_wf_data = {"is_mean": is_mean, "oos_mean": oos_mean, "degradation": degradation}
-
-    # ------------------------------------------------------------------
-    section("5. AI Analyst (if enabled)")
-    # ------------------------------------------------------------------
-
-    analyze_portfolio(analyst_alloc_metrics, walk_forward=analyst_wf_data)
 
     print("Done.")
 

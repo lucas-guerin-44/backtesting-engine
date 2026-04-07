@@ -17,7 +17,47 @@ from typing import List, Optional
 import numpy as np
 from scipy import stats
 
-from utils import compute_sharpe
+
+# ---------------------------------------------------------------------------
+# Sharpe ratio
+# ---------------------------------------------------------------------------
+
+def compute_sharpe(equity_curve, risk_free: float = 0.0, annualize: bool = True, freq_per_year: int = 252) -> float:
+    """Compute Sharpe ratio from an equity curve.
+
+    Parameters
+    ----------
+    equity_curve : array-like
+        Sequence of portfolio equity values over time.
+    risk_free : float
+        Annual risk-free rate (default 0).
+    annualize : bool
+        Whether to annualize the ratio.
+    freq_per_year : int
+        Number of observation periods per year (252 for daily bars).
+
+    Returns
+    -------
+    float
+        The Sharpe ratio, or 0.0 if it cannot be computed.
+    """
+    equity_curve = np.array(equity_curve, dtype=float)
+
+    valid_idx = equity_curve[:-1] > 1e-8
+    if not np.any(valid_idx):
+        return 0.0
+
+    returns = np.diff(equity_curve)[valid_idx] / equity_curve[:-1][valid_idx]
+    excess_returns = returns - risk_free / freq_per_year
+
+    if np.std(excess_returns, ddof=1) == 0:
+        return 0.0
+
+    sharpe = np.mean(excess_returns) / np.std(excess_returns, ddof=1)
+    if annualize:
+        sharpe *= np.sqrt(freq_per_year)
+
+    return sharpe
 
 
 # ---------------------------------------------------------------------------

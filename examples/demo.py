@@ -37,8 +37,8 @@ from strategies import (
     MomentumStrategy,
     TrendFollowingStrategy,
 )
-from ai_analyst import analyze_backtest
-from utils import compute_sharpe, fetch_ohlc
+from backtesting.statistics import compute_sharpe
+from utils import fetch_ohlc
 
 INSTRUMENT = "XAUUSD"
 TIMEFRAME = "D1"
@@ -90,7 +90,6 @@ def main():
     print(f"{'Strategy':<20s} {'Return':>8s} {'Max DD':>8s} {'Sharpe':>8s} {'Trades':>7s} {'Win %':>7s}")
     print("-" * 60)
 
-    analyst_metrics = {}
     equity_curves = {}
 
     for name, strat in strategies.items():
@@ -103,12 +102,6 @@ def main():
         win_rate = wins / len(trades) * 100 if trades else 0
         ret = (eq[-1] - 10_000) / 10_000 * 100
         sharpe = compute_sharpe(eq)
-
-        analyst_metrics[name] = {
-            "pct_return": ret, "sharpe": sharpe,
-            "max_drawdown": bt.max_drawdown * 100,
-            "total_trades": len(trades), "win_rate": win_rate,
-        }
 
         print(f"{name:<20s} {ret:>+7.2f}% {bt.max_drawdown*100:>7.2f}% {sharpe:>8.4f} {len(trades):>7d} {win_rate:>6.1f}%")
 
@@ -154,10 +147,6 @@ def main():
     print(f"Best params:")
     for k, v in result.best_params.items():
         print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
-
-    analyst_metrics["Momentum"]["optimization"] = {
-        "best_sharpe": result.best_score, "n_trials": 1000,
-    }
 
     print(f"\nTop 5 trials:")
     print(result.all_trials.head(5).to_string(index=False))
@@ -267,11 +256,6 @@ def main():
                                for k, v in p.items())
         print(f"  Split {s['split']}: {params_str}")
     print()
-
-    analyst_metrics["Momentum"]["walk_forward"] = {
-        "is_mean": is_mean, "oos_mean": oos_mean,
-        "degradation": degradation,
-    }
 
     if degradation > 0.5:
         print("Verdict: Large degradation — the optimizer is curve-fitting, not finding real signal.")
@@ -403,13 +387,7 @@ def main():
     print()
     print(f"At vectorized speed, 1000 optimizer trials = ~{1000*vec_time:.0f}s")
 
-    # ------------------------------------------------------------------
-    section("8. AI Analyst (if enabled)")
-    # ------------------------------------------------------------------
-
-    analyze_backtest(analyst_metrics)
-
-    print("Done. See README.md for full documentation.")
+    print("Done.")
 
 
 if __name__ == "__main__":

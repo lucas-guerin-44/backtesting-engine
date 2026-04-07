@@ -7,7 +7,8 @@ import pytest
 
 import pandas as pd
 
-from utils import compute_sharpe, infer_freq_per_year, normalize_tf, sanitize
+from backtesting.statistics import compute_sharpe
+from utils import infer_freq_per_year, normalize_tf, sanitize
 
 
 class TestComputeSharpe:

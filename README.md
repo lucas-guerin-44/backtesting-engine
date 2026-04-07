@@ -40,7 +40,12 @@ Define trading strategies as Python classes, run them against historical price d
 │  results_db.py          ← SQLite persistence        │
 ├─────────────────────────────────────────────────────┤
 │  strategy_registry.py                               │
-│  strategies.py (4 strategy implementations)         │
+│  strategies/             (4 strategy implementations)│
+│    trend_following.py    ← EMA crossover + ATR stops │
+│    mean_reversion.py     ← Bollinger + RSI           │
+│    momentum.py           ← rate-of-change breakout   │
+│    donchian.py           ← channel breakout          │
+│    base.py               ← shared sizing + filters   │
 ├─────────────────────────────────────────────────────┤
 │  backtesting/                                       │
 │    backtest.py           ← event-driven engine      │
@@ -50,13 +55,13 @@ Define trading strategies as Python classes, run them against historical price d
 │    broker.py             ← trade execution          │
 │    portfolio.py          ← equity, drawdown, margin │
 │    indicators.py         ← O(1) incremental + vec   │
-│    statistics.py         ← bootstrap, DSR, perm     │
+│    statistics.py         ← Sharpe, bootstrap, DSR   │
 │    data.py               ← OHLC validation          │
 │    plot.py               ← equity + drawdown charts │
 │    strategy.py           ← abstract base class      │
 │    types.py              ← Bar, Trade dataclasses   │
 ├─────────────────────────────────────────────────────┤
-│  utils.py  (data fetching, Sharpe ratio, etc.)      │
+│  utils.py  (data fetching, frequency inference)     │
 │  config.py (env-based configuration)                │
 └─────────────────────────────────────────────────────┘
 ```
@@ -99,14 +104,14 @@ The `PortfolioBacktester` runs multiple strategies on multiple assets with share
 ```python
 from backtesting.portfolio_backtest import PortfolioBacktester
 from backtesting.allocation import RiskParityAllocator
-from strategies import TrendFollowingStrategy, MeanReversionStrategy
+from strategies import TrendFollowingStrategy, DonchianBreakoutStrategy, MomentumStrategy
 
 pbt = PortfolioBacktester(
-    dataframes={"XAUUSD": df_gold, "EURUSD": df_eur, "BTCUSD": df_btc},
+    dataframes={"XAUUSD": df_gold, "EURUSD": df_eur, "NDX100": df_ndx},
     strategies={
         "XAUUSD": TrendFollowingStrategy(),
-        "EURUSD": MeanReversionStrategy(),
-        "BTCUSD": TrendFollowingStrategy(),
+        "EURUSD": DonchianBreakoutStrategy(),
+        "NDX100": MomentumStrategy(),
     },
     allocator=RiskParityAllocator(),
     starting_cash=100_000,
@@ -142,7 +147,7 @@ pbt = PortfolioBacktester(
 )
 ```
 
-Trades that would breach any limit are silently skipped. The Broker's buying power check still applies as a secondary guard.
+Trades that would breach any limit are skipped and logged to the audit trail (`result.audit_log`) with the rejection reason (e.g. `"gross_exposure"`, `"single_asset"`, `"net_exposure"`). The Broker's buying power check still applies as a secondary guard.
 
 ### Regime-aware allocation
 
@@ -152,8 +157,8 @@ The `RegimeAllocator` measures cross-asset rolling volatility percentiles to det
 from backtesting.allocation import RegimeAllocator
 
 allocator = RegimeAllocator(
-    trend_symbols={"XAUUSD", "SPX500", "EURUSD"},     # Get more weight in high-vol
-    reversion_symbols={"GBPUSD"},                       # Get more weight in low-vol
+    trend_symbols={"XAUUSD", "SPX500", "NDX100"},     # Get more weight in high-vol
+    reversion_symbols={"EURUSD"},                       # Get more weight in low-vol
     vol_lookback=200,       # Short window for current vol
     vol_history=5000,       # Long window for percentile baseline
     vol_threshold_pct=50,   # Above = trending, below = ranging
@@ -207,9 +212,6 @@ cp .env.example .env
 | `DATALAKE_URL` | `http://127.0.0.1:8008` | OHLC datalake API endpoint |
 | `LOCAL_API_URL` | `http://127.0.0.1:8001` | Backtesting API URL |
 | `LOCAL_API_PORT` | `8001` | Port for the FastAPI server |
-| `AI_ANALYST` | `false` | Enable local LLM post-backtest analysis (requires [Ollama](https://ollama.com)) |
-| `AI_MODEL` | `llama3.2:3b` | Ollama model to use for analysis |
-| `OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama API endpoint |
 
 ### Quick Start
 
@@ -452,7 +454,7 @@ from backtesting.plot import plot_backtest, plot_strategy_comparison
 
 # Single strategy equity curve with drawdown
 plot_backtest(equity_curve, trades, timestamps=list(df.index),
-              title="Trend Following — XAUUSD H1", save_path="chart.png")
+              title="Trend Following — XAUUSD D1", save_path="chart.png")
 
 # Compare multiple strategies
 plot_strategy_comparison({
@@ -489,25 +491,12 @@ At vectorized speed, 1,000 Optuna trials on 3,000 bars completes in ~5 seconds.
 | `test_optimizer.py` | 12 | Single-period, walk-forward, parallel execution, objective functions |
 | `test_results_db.py` | 15 | CRUD, query filtering, walk-forward splits, cascade delete |
 | `test_vectorized.py` | 13 | Vectorized backtester, signal generators, gap-aware stops |
-| `test_utils.py` | 18 | Sharpe ratio, frequency inference, sanitize, timeframe normalization |
+| `test_utils.py` | 18 | Sharpe ratio, data fetching, frequency inference, sanitize, timeframe normalization |
 | `test_types.py` | 5 | Bar and Trade dataclass creation |
 
 ```bash
 python -m pytest tests/ -v  # 201 tests in ~2.7s
 ```
-
-## AI Analyst
-
-Optional local LLM analysis after each backtest run. Uses [Ollama](https://ollama.com) to run a small model on your machine — no API keys, no cloud, no data leaves your computer.
-
-Enable it:
-```bash
-# .env
-AI_ANALYST=true
-AI_MODEL=llama3.2:3b   # or any Ollama model
-```
-
-The model is pulled automatically on first run. After backtests complete, the analyst prints a plain-English review covering performance, risk, overfitting signals, and concrete suggestions — referencing the actual numbers from your run.
 
 ## Research
 
