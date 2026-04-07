@@ -16,7 +16,7 @@ Built with Python. Data sourced from [lucas-guerin-44/datalake-api](https://gith
 - **Multi-asset portfolios**: shared cash, cross-asset risk limits, 4 allocation schemes (equal weight, risk parity, correlation-aware, regime-aware)
 - **Bayesian optimization**: Optuna TPE with walk-forward validation and parameter constraints
 - **Statistical testing**: bootstrap CI, permutation test, Deflated Sharpe Ratio (Bailey & Lopez de Prado 2014)
-- **213 tests** across 14 modules in ~3s
+- **213 tests** across 14 modules in ~3s — includes cross-engine consistency checks (event-driven vs vectorized produce equivalent results) and walk-forward contamination regression tests (proves OOS data never leaks into training). Reproducible benchmark script in `benchmarks/`
 
 ## Architecture
 
