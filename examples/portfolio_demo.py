@@ -30,7 +30,7 @@ from backtesting.allocation import (
 from backtesting.backtest import Backtester
 from backtesting.plot import plot_portfolio
 from backtesting.portfolio_backtest import PortfolioBacktester, RiskLimits
-from portfolio_optimizer import StrategyConfig, portfolio_optimize, portfolio_walk_forward
+from portfolio_optimizer import StrategyConfig, portfolio_optimize
 from strategies import (
     DonchianBreakoutStrategy,
     MeanReversionStrategy,
@@ -372,75 +372,170 @@ def main():
     section("4. Walk-Forward Validation (the overfitting test)")
     # ------------------------------------------------------------------
 
-    # Lock down signal params from the full optimization above.
-    # Only optimize risk_per_trade per asset in walk-forward.
+    # Two-stage walk-forward: for each split, BOTH optimization stages run
+    # on training data only. The OOS window is never seen during parameter
+    # selection. This avoids the contamination of locking params from a
+    # full-dataset optimization.
     #
-    # Why: with 6 assets × 4-5 signal params = 25+ free parameters, even 200
-    # trials can't explore the space meaningfully — the optimizer finds noise.
-    # Locking signal params to their converged values and only tuning position
-    # sizing (risk_per_trade) reduces the search to 6 dimensions. This is the
-    # same approach that turned single-asset walk-forward from "curve-fitting"
-    # (degradation 1.5+) to "OOS outperforms IS" (degradation -1.4).
-    locked_configs = {}
-    for sym in opt_symbols:
-        _, strat_cls, strat_kw = STRATEGY_MAP.get(sym, ("Trend Following", TrendFollowingStrategy, _TF_KWARGS))
-        # Merge the optimized signal params into fixed_params
-        optimized_params = opt_result.best_strategy_params.get(sym, {})
-        locked_fixed = dict(strat_kw)
-        for k, v in optimized_params.items():
-            if k != "risk_per_trade":
-                locked_fixed[k] = v
-        locked_configs[sym] = StrategyConfig(
-            strategy_cls=strat_cls,
-            param_space={"risk_per_trade": (0.01, 0.04)},
-            fixed_params=locked_fixed,
+    #   Stage 1: optimize ALL params on training data (find signal region)
+    #   Stage 2: lock signal params, optimize only risk_per_trade on training data
+    #   Evaluate: run locked+sized params on test data (completely unseen)
+
+    n_splits = 3
+    train_ratio = 0.7
+    wf_allocator = RiskParityAllocator(min_lookback=60, max_weight=0.30)
+
+    # Build master timestamp index for splitting
+    master_idx = opt_dfs[opt_symbols[0]].index
+    for sym in opt_symbols[1:]:
+        master_idx = master_idx.union(opt_dfs[sym].index)
+    master_idx = master_idx.sort_values()
+    total_bars = len(master_idx)
+    window_size = total_bars // n_splits
+
+    from optimizer import OBJECTIVES as _OBJ
+    from utils import infer_freq_per_year
+    obj_fn = _OBJ["sharpe"]
+    freq = infer_freq_per_year(opt_dfs[opt_symbols[0]].index)
+
+    print(f"Two-stage walk-forward: {n_splits} splits, both stages train-only.")
+    print(f"  Stage 1: full optimization per asset on training data (200 trials)")
+    print(f"  Stage 2: lock signal params, optimize risk_per_trade (200 trials)")
+    print(f"  Evaluate: test on unseen data\n")
+
+    wf_splits = []
+    for split_idx in range(n_splits):
+        window_start = split_idx * window_size
+        window_end = min(window_start + window_size, total_bars)
+        split_point = window_start + int((window_end - window_start) * train_ratio)
+
+        train_start_ts = master_idx[0]  # anchored
+        train_end_ts = master_idx[split_point - 1]
+        test_start_ts = master_idx[split_point]
+        test_end_ts = master_idx[window_end - 1]
+
+        # Split each asset by date range
+        train_dfs = {}
+        test_dfs = {}
+        valid = True
+        for sym in opt_symbols:
+            d = opt_dfs[sym]
+            tr = d[(d.index >= train_start_ts) & (d.index <= train_end_ts)]
+            te = d[(d.index >= test_start_ts) & (d.index <= test_end_ts)]
+            if len(tr) < 20 or len(te) < 5:
+                valid = False
+                break
+            train_dfs[sym] = tr
+            test_dfs[sym] = te
+        if not valid:
+            continue
+
+        # Stage 1: full optimization on training data only
+        stage1 = portfolio_optimize(
+            strategy_configs=full_configs,
+            dataframes=train_dfs,
+            allocator=wf_allocator,
+            n_trials=200,
+            objective="sharpe",
+            starting_cash=STARTING_CASH,
+            commission_bps=COMMISSION_BPS,
+            slippage_bps=SLIPPAGE_BPS,
+            rebalance_frequency=21,
+            vol_lookback=500,
+            min_trades=10,
+            top_k_avg=5,
         )
 
-    print(f"Locked signal params from optimization convergence.")
-    print(f"Walk-forward optimizes only risk_per_trade per asset (6 free params).\n")
-    print(f"3 train/test splits across all {len(opt_symbols)} assets...")
-    print("For each window: optimize on train, evaluate on unseen test data\n")
+        # Stage 2: lock signal params from stage 1, optimize risk_per_trade only
+        locked_configs = {}
+        for sym in opt_symbols:
+            _, strat_cls, strat_kw = STRATEGY_MAP.get(sym, ("Trend Following", TrendFollowingStrategy, _TF_KWARGS))
+            optimized = stage1.best_strategy_params.get(sym, {})
+            locked_fixed = dict(strat_kw)
+            for k, v in optimized.items():
+                if k != "risk_per_trade":
+                    locked_fixed[k] = v
+            locked_configs[sym] = StrategyConfig(
+                strategy_cls=strat_cls,
+                param_space={"risk_per_trade": (0.01, 0.04)},
+                fixed_params=locked_fixed,
+            )
 
-    wf = portfolio_walk_forward(
-        strategy_configs=locked_configs,
-        dataframes=opt_dfs,
-        allocator=RiskParityAllocator(min_lookback=60, max_weight=0.30),
-        n_splits=3,
-        train_ratio=0.7,
-        n_trials=200,
-        objective="sharpe",
-        starting_cash=STARTING_CASH,
-        commission_bps=COMMISSION_BPS,
-        slippage_bps=SLIPPAGE_BPS,
-        rebalance_frequency=21,
-        vol_lookback=500,
-        min_trades=10,
-        top_k_avg=5,
-        anchored=True,
-    )
+        stage2 = portfolio_optimize(
+            strategy_configs=locked_configs,
+            dataframes=train_dfs,
+            allocator=wf_allocator,
+            n_trials=200,
+            objective="sharpe",
+            starting_cash=STARTING_CASH,
+            commission_bps=COMMISSION_BPS,
+            slippage_bps=SLIPPAGE_BPS,
+            rebalance_frequency=21,
+            vol_lookback=500,
+            min_trades=10,
+            top_k_avg=5,
+        )
 
-    print(wf.summary.to_string(index=False))
+        # Evaluate on test data (never seen by either stage)
+        test_strategies = {}
+        for sym in opt_symbols:
+            merged = {**locked_configs[sym].fixed_params,
+                      **stage2.best_strategy_params.get(sym, {})}
+            test_strategies[sym] = locked_configs[sym].strategy_cls(**merged)
+
+        pbt_test = PortfolioBacktester(
+            dataframes=test_dfs,
+            strategies=test_strategies,
+            allocator=wf_allocator,
+            starting_cash=STARTING_CASH,
+            commission_bps=COMMISSION_BPS,
+            slippage_bps=SLIPPAGE_BPS,
+            rebalance_frequency=21,
+            vol_lookback=500,
+        )
+        test_result = pbt_test.run()
+        oos_score = obj_fn(test_result.equity_curve, test_result.trades,
+                           freq_per_year=freq)
+        oos_ret = (test_result.equity_curve[-1] - STARTING_CASH) / STARTING_CASH * 100
+
+        wf_splits.append({
+            "split": split_idx,
+            "train": f"{train_start_ts.date()} to {train_end_ts.date()}",
+            "test": f"{test_start_ts.date()} to {test_end_ts.date()}",
+            "IS_score": round(stage2.best_score, 4),
+            "OOS_score": round(oos_score, 4),
+            "OOS_return_pct": round(oos_ret, 2),
+            "OOS_max_dd_pct": round(pbt_test.max_drawdown * 100, 2),
+            "OOS_trades": len(test_result.trades),
+        })
+
+    wf_summary = pd.DataFrame(wf_splits)
+    is_scores = [s["IS_score"] for s in wf_splits]
+    oos_scores = [s["OOS_score"] for s in wf_splits]
+    is_mean = round(np.mean(is_scores), 4)
+    oos_mean = round(np.mean(oos_scores), 4)
+    degradation = round(is_mean - oos_mean, 4)
+
+    print(wf_summary.to_string(index=False))
     print()
-    print(f"In-sample mean:      {wf.in_sample_mean:>8.4f}  (optimized — always looks good)")
-    print(f"Out-of-sample mean:  {wf.out_of_sample_mean:>8.4f}  (the honest number)")
-    print(f"Degradation:         {wf.degradation:>8.4f}  (IS - OOS)")
+    print(f"In-sample mean:      {is_mean:>8.4f}  (optimized — always looks good)")
+    print(f"Out-of-sample mean:  {oos_mean:>8.4f}  (the honest number)")
+    print(f"Degradation:         {degradation:>8.4f}  (IS - OOS)")
     print()
-    if wf.degradation > 0.5:
+    if degradation > 0.5:
         print(">> Large degradation — optimizer is curve-fitting.")
-    elif wf.out_of_sample_mean > 0:
+    elif oos_mean > 0:
         print(">> Positive OOS — there may be a real portfolio-level edge.")
     else:
         print(">> Negative OOS — no reliable portfolio edge detected.")
+
+    analyst_wf_data = {"is_mean": is_mean, "oos_mean": oos_mean, "degradation": degradation}
 
     # ------------------------------------------------------------------
     section("5. AI Analyst (if enabled)")
     # ------------------------------------------------------------------
 
-    analyst_wf = {
-        "is_mean": wf.in_sample_mean, "oos_mean": wf.out_of_sample_mean,
-        "degradation": wf.degradation,
-    }
-    analyze_portfolio(analyst_alloc_metrics, walk_forward=analyst_wf)
+    analyze_portfolio(analyst_alloc_metrics, walk_forward=analyst_wf_data)
 
     print("Done.")
 

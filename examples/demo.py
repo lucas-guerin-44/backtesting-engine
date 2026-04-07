@@ -166,48 +166,116 @@ def main():
     section("3. Walk-Forward Validation (the overfitting test)")
     # ------------------------------------------------------------------
 
-    # Lock down the converged params, only optimize risk_per_trade
-    locked_param_space = {"risk_per_trade": (0.01, 0.05)}
-    locked_fixed = {
-        "lookback": result.best_params.get("lookback", 6),
-        "entry_threshold": result.best_params.get("entry_threshold", 0.018),
-        "atr_stop_mult": result.best_params.get("atr_stop_mult", 1.35),
-        "atr_target_mult": result.best_params.get("atr_target_mult", 2.1),
-        "trend_filter_period": 200,
-    }
+    # Two-stage walk-forward: for each split, BOTH stages run on training
+    # data only. The OOS window is never seen during parameter selection.
+    #
+    # Previous approach locked signal params from a full-dataset optimization,
+    # which contaminates the walk-forward — the locked params were selected
+    # by a process that saw the OOS windows. This version fixes that:
+    #
+    #   Stage 1: optimize ALL params on training data (find signal region)
+    #   Stage 2: lock signal params, optimize only risk_per_trade on training data
+    #   Evaluate: run locked+sized params on test data (completely unseen)
 
-    print("Locked params from optimization convergence:")
-    for k, v in locked_fixed.items():
-        if k != "trend_filter_period":
-            print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
-    print("Optimizing only: risk_per_trade")
-    print()
-    print("Splitting data into 3 train/test windows (200 trials each)...")
-    print("For each window: optimize on train, evaluate on test (unseen data)")
+    n_splits = 3
+    train_ratio = 0.7
+    total_bars = len(df)
+    window_size = total_bars // n_splits
+
+    print(f"Two-stage walk-forward: {n_splits} splits, both stages train-only.")
+    print("  Stage 1: full optimization on training data (500 trials)")
+    print("  Stage 2: lock signal params, optimize risk_per_trade (200 trials)")
+    print("  Evaluate: test on unseen data")
     print()
 
-    wf = walk_forward(
-        MomentumStrategy, locked_param_space, df,
-        n_splits=3, train_ratio=0.7, n_trials=200,
-        objective="sharpe", commission_bps=5.0, slippage_bps=2.0,
-        fixed_params=locked_fixed,
-        min_trades=10, top_k_avg=5, anchored=True,
-    )
+    from optimizer import OBJECTIVES
+    obj_fn = OBJECTIVES["sharpe"]
+    freq = 252  # daily
 
-    print(wf.summary.to_string(index=False))
+    wf_splits = []
+    for split_idx in range(n_splits):
+        window_start = split_idx * window_size
+        window_end = min(window_start + window_size, total_bars)
+        split_point = window_start + int((window_end - window_start) * train_ratio)
+
+        train_df = df.iloc[0:split_point]  # anchored
+        test_df = df.iloc[split_point:window_end]
+
+        if len(train_df) < 30 or len(test_df) < 10:
+            continue
+
+        # Stage 1: full optimization on training data only
+        stage1 = optimize(
+            MomentumStrategy, full_param_space, train_df,
+            n_trials=500, objective="sharpe", commission_bps=5.0, slippage_bps=2.0,
+            fixed_params=fixed_params, min_trades=10, top_k_avg=5, symbol=INSTRUMENT,
+        )
+
+        # Stage 2: lock signal params from stage 1, optimize risk_per_trade
+        locked_fixed = dict(fixed_params)
+        for k, v in stage1.best_params.items():
+            if k != "risk_per_trade":
+                locked_fixed[k] = v
+
+        stage2 = optimize(
+            MomentumStrategy, {"risk_per_trade": (0.01, 0.05)}, train_df,
+            n_trials=200, objective="sharpe", commission_bps=5.0, slippage_bps=2.0,
+            fixed_params=locked_fixed, min_trades=10, top_k_avg=5, symbol=INSTRUMENT,
+        )
+
+        # Evaluate on test data (never seen by either stage)
+        final_params = {**locked_fixed, **stage2.best_params}
+        bt_test = Backtester(test_df, MomentumStrategy(**final_params),
+                             starting_cash=10_000, commission_bps=5.0,
+                             slippage_bps=2.0, symbol=INSTRUMENT)
+        eq_test, trades_test = bt_test.run()
+        oos_score = obj_fn(eq_test, trades_test, freq_per_year=freq)
+
+        wf_splits.append({
+            "split": split_idx,
+            "train": f"{train_df.index[0].date()} to {train_df.index[-1].date()}",
+            "test": f"{test_df.index[0].date()} to {test_df.index[-1].date()}",
+            "IS_score": round(stage2.best_score, 4),
+            "OOS_score": round(oos_score, 4),
+            "OOS_return_pct": round((eq_test[-1] - 10_000) / 10_000 * 100, 2),
+            "OOS_max_dd_pct": round(bt_test.max_drawdown * 100, 2),
+            "OOS_trades": len(trades_test),
+            "locked_params": {k: v for k, v in final_params.items()
+                              if k not in ("trend_filter_period",)},
+        })
+
+    wf_summary = pd.DataFrame([{k: v for k, v in s.items() if k != "locked_params"}
+                                for s in wf_splits])
+    is_scores = [s["IS_score"] for s in wf_splits]
+    oos_scores = [s["OOS_score"] for s in wf_splits]
+    is_mean = round(np.mean(is_scores), 4)
+    oos_mean = round(np.mean(oos_scores), 4)
+    degradation = round(is_mean - oos_mean, 4)
+
+    print(wf_summary.to_string(index=False))
     print()
-    print(f"In-sample mean Sharpe:      {wf.in_sample_mean:>8.4f}  (optimized — always looks good)")
-    print(f"Out-of-sample mean Sharpe:  {wf.out_of_sample_mean:>8.4f}  (the honest number)")
-    print(f"Degradation:                {wf.degradation:>8.4f}  (IS - OOS, measures overfitting)")
+    print(f"In-sample mean Sharpe:      {is_mean:>8.4f}  (optimized — always looks good)")
+    print(f"Out-of-sample mean Sharpe:  {oos_mean:>8.4f}  (the honest number)")
+    print(f"Degradation:                {degradation:>8.4f}  (IS - OOS, measures overfitting)")
     print()
+
+    # Show that signal params converge independently per split
+    print("Signal params found per split (should converge if signal is real):")
+    for s in wf_splits:
+        p = s["locked_params"]
+        params_str = ", ".join(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}"
+                               for k, v in p.items())
+        print(f"  Split {s['split']}: {params_str}")
+    print()
+
     analyst_metrics["Momentum"]["walk_forward"] = {
-        "is_mean": wf.in_sample_mean, "oos_mean": wf.out_of_sample_mean,
-        "degradation": wf.degradation,
+        "is_mean": is_mean, "oos_mean": oos_mean,
+        "degradation": degradation,
     }
 
-    if wf.degradation > 0.5:
+    if degradation > 0.5:
         print("Verdict: Large degradation — the optimizer is curve-fitting, not finding real signal.")
-    elif wf.out_of_sample_mean > 0:
+    elif oos_mean > 0:
         print("Verdict: Positive OOS Sharpe — there may be a real edge here.")
     else:
         print("Verdict: Negative OOS Sharpe — no reliable edge detected.")
