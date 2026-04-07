@@ -36,3 +36,10 @@ trade_charts/
 
 # Docker local overrides
 docker-compose.override.yml
+
+# Cython build artifacts
+build/
+backtesting/_core.c
+*.pyd
+*.so
+*.egg-info/

@@ -360,8 +360,10 @@ def main():
         print(db.query_runs()[["strategy_name", "sharpe", "pct_return", "max_drawdown", "total_trades"]].to_string(index=False))
 
     # ------------------------------------------------------------------
-    section("7. Performance: Event-Driven vs Vectorized")
+    section("7. Performance: Event-Driven vs Vectorized + Cython")
     # ------------------------------------------------------------------
+
+    from backtesting.vectorized import _HAS_CYTHON
 
     o = df["open"].to_numpy(dtype=np.float64)
     h = df["high"].to_numpy(dtype=np.float64)
@@ -376,20 +378,22 @@ def main():
     evt_time = (time.perf_counter() - t0) / 200
     evt_bps = len(df) / evt_time
 
-    # Vectorized
+    # Vectorized (uses Cython if compiled, pure Python otherwise)
+    n_iters = 5000 if _HAS_CYTHON else 1000
     t0 = time.perf_counter()
-    for _ in range(1000):
+    for _ in range(n_iters):
         entries, sides, stops, tps = trend_following_signals(o, h, lo, c)
         VectorizedBacktester(o, h, lo, c, starting_cash=10_000).run(
             entries, sides, stops, tps, risk_per_trade=0.02, cooldown_bars=5)
-    vec_time = (time.perf_counter() - t0) / 1000
+    vec_time = (time.perf_counter() - t0) / n_iters
     vec_bps = len(df) / vec_time
 
-    print(f"Event-driven:  {evt_bps:>10,.0f} bars/sec  ({evt_time*1000:.1f} ms/run)")
-    print(f"Vectorized:    {vec_bps:>10,.0f} bars/sec  ({vec_time*1000:.1f} ms/run)")
-    print(f"Speedup:       {vec_bps/evt_bps:.1f}x")
+    cython_label = " + Cython" if _HAS_CYTHON else " (pure Python)"
+    print(f"Event-driven:  {evt_bps:>12,.0f} bars/sec  ({evt_time*1000:.1f} ms/run)")
+    print(f"Vectorized{cython_label}: {vec_bps:>12,.0f} bars/sec  ({vec_time*1000:.2f} ms/run)")
+    print(f"Speedup:       {vec_bps/evt_bps:.0f}x")
     print()
-    print(f"At vectorized speed, 1000 optimizer trials = ~{1000*vec_time:.0f}s")
+    print(f"At vectorized speed, 1000 optimizer trials = ~{1000*vec_time:.1f}s")
 
     print("Done.")
 

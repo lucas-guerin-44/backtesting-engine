@@ -161,8 +161,15 @@ class BollingerBands:
 # Vectorized indicators (for pre-computation / optimizer)
 # ---------------------------------------------------------------------------
 
-def ema_array(prices: np.ndarray, period: int) -> np.ndarray:
-    """Compute EMA over a full price array. Returns NaN for warmup bars."""
+try:
+    from backtesting._core import cy_ema_array, cy_atr_array, cy_rsi_array
+    _HAS_CYTHON_INDICATORS = True
+except ImportError:
+    _HAS_CYTHON_INDICATORS = False
+
+
+def _ema_array_python(prices: np.ndarray, period: int) -> np.ndarray:
+    """Pure Python EMA (fallback)."""
     alpha = 2.0 / (period + 1)
     out = np.empty_like(prices, dtype=np.float64)
     out[0] = prices[0]
@@ -172,8 +179,8 @@ def ema_array(prices: np.ndarray, period: int) -> np.ndarray:
     return out
 
 
-def atr_array(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int) -> np.ndarray:
-    """Compute ATR over full OHLC arrays. Returns NaN for warmup bars."""
+def _atr_array_python(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int) -> np.ndarray:
+    """Pure Python ATR (fallback)."""
     n = len(high)
     tr = np.empty(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
@@ -188,8 +195,8 @@ def atr_array(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int)
     return out
 
 
-def rsi_array(prices: np.ndarray, period: int = 14) -> np.ndarray:
-    """Compute RSI over a full price array. Returns NaN for warmup bars."""
+def _rsi_array_python(prices: np.ndarray, period: int = 14) -> np.ndarray:
+    """Pure Python RSI (fallback)."""
     n = len(prices)
     out = np.full(n, np.nan, dtype=np.float64)
     deltas = np.diff(prices)
@@ -207,3 +214,9 @@ def rsi_array(prices: np.ndarray, period: int = 14) -> np.ndarray:
             else:
                 out[i + 1] = 100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
     return out
+
+
+# Use Cython versions when available, fall back to pure Python
+ema_array = cy_ema_array if _HAS_CYTHON_INDICATORS else _ema_array_python
+atr_array = cy_atr_array if _HAS_CYTHON_INDICATORS else _atr_array_python
+rsi_array = cy_rsi_array if _HAS_CYTHON_INDICATORS else _rsi_array_python

@@ -11,7 +11,7 @@ Built with Python. Data sourced from [lucas-guerin-44/datalake-api](https://gith
 
 ## Features
 
-- **Dual execution engines**: event-driven (~300k bars/sec) and vectorized (~600k bars/sec), pure Python
+- **Three execution tiers**: event-driven (~300k bars/sec), vectorized (~700k bars/sec), and Cython-accelerated (~27M bars/sec). Optional C extension accelerates indicator computation (EMA, ATR, RSI) and trade chaining — 1,000 optimizer trials in ~8s vs ~29s pure Python
 - **Gap-aware stops**: if price gaps past a stop level, fills at the open (worse price), not the stop
 - **Multi-asset portfolios**: shared cash, cross-asset risk limits, 4 allocation schemes (equal weight, risk parity, correlation-aware, regime-aware)
 - **Bayesian optimization**: Optuna TPE with walk-forward validation and parameter constraints
@@ -44,6 +44,7 @@ Built with Python. Data sourced from [lucas-guerin-44/datalake-api](https://gith
 │    portfolio_backtest.py ← multi-asset engine       │
 │    allocation.py         ← 4 allocation schemes     │
 │    vectorized.py         ← numpy engine             │
+│    _core.pyx             ← Cython C extension (opt) │
 │    broker.py             ← trade execution          │
 │    portfolio.py          ← equity, drawdown, margin │
 │    indicators.py         ← O(1) incremental + vec   │
@@ -66,6 +67,7 @@ Strategies extend `Strategy` and implement `on_bar(i, bar, equity) -> Optional[T
 python -m venv venv && source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env  # Set DATALAKE_URL
+pip install cython && python setup.py build_ext --inplace  # Optional: ~3.5x optimizer speedup
 ```
 
 ```bash

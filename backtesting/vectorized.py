@@ -36,6 +36,12 @@ from typing import List, Tuple
 
 import numpy as np
 
+try:
+    from backtesting._core import chain_trades as _cython_chain_trades
+    _HAS_CYTHON = True
+except ImportError:
+    _HAS_CYTHON = False
+
 
 @dataclass
 class VectorizedTrade:
@@ -124,21 +130,58 @@ class VectorizedBacktester:
         tuple of (np.ndarray, list[VectorizedTrade])
             Equity curve and list of closed trades.
         """
+        c = self.close
+
+        if _HAS_CYTHON:
+            # --- Cython fast path ---
+            entries_u8 = np.asarray(entries, dtype=np.uint8)
+            sides_f64 = np.asarray(sides, dtype=np.float64)
+            raw_trades, cash = _cython_chain_trades(
+                entries_u8, sides_f64,
+                np.asarray(stop_prices, dtype=np.float64),
+                np.asarray(tp_prices, dtype=np.float64),
+                self.open, self.high, self.low, c,
+                self.starting_cash, self.comm_factor, self.slip_factor,
+                risk_per_trade, max_dd_halt, cooldown_bars,
+            )
+            trades = [VectorizedTrade(*t) for t in raw_trades]
+        else:
+            # --- Pure Python fallback ---
+            trades, cash = self._chain_trades_python(
+                entries, sides, stop_prices, tp_prices,
+                risk_per_trade, max_dd_halt, cooldown_bars,
+            )
+
+        # --- Phase 2: Build equity curve (numpy) ---
+        equity = self._build_equity_curve(trades, c)
+
+        self.cash = cash
+        self.max_drawdown = 0.0
+        if len(equity) > 0:
+            peak = np.maximum.accumulate(equity)
+            dd_arr = (peak - equity) / np.where(peak > 0, peak, 1.0)
+            self.max_drawdown = float(np.max(dd_arr))
+
+        return equity, trades
+
+    def _chain_trades_python(self, entries, sides, stop_prices, tp_prices,
+                              risk_per_trade, max_dd_halt, cooldown_bars):
+        """Pure Python trade-chaining loop (fallback when Cython is not compiled)."""
         n = self.n
         o, h, lo, c = self.open, self.high, self.low, self.close
         comm = self.comm_factor
         slip = self.slip_factor
 
-        # --- Phase 1: Chain trades (find entry/exit pairs) ---
         trades: List[VectorizedTrade] = []
         cash = self.starting_cash
         peak_equity = cash
         bar = 0
-        bars_since_trade = cooldown_bars  # Allow immediate first trade
+        bars_since_trade = cooldown_bars
 
         while bar < n:
             if not entries[bar]:
                 bar += 1
+                bars_since_trade += 1
                 continue
 
             if bars_since_trade < cooldown_bars:
@@ -150,18 +193,15 @@ class VectorizedBacktester:
             stop = stop_prices[bar]
             tp = tp_prices[bar]
 
-            # Skip invalid signals
             if np.isnan(stop) or np.isnan(tp) or side == 0:
                 bar += 1
                 continue
 
-            # Drawdown guard
             dd = (peak_equity - cash) / peak_equity if peak_equity > 0 else 0.0
             if dd >= max_dd_halt:
                 bar += 1
                 continue
 
-            # Position sizing
             dd_scale = max(0.0, 1.0 - dd / max_dd_halt)
             risk_per_unit = abs(c[bar] - stop)
             if risk_per_unit <= 0:
@@ -176,20 +216,15 @@ class VectorizedBacktester:
                 bar += 1
                 continue
 
-            # Entry commission
             entry_comm = abs(entry_price * size * comm)
             if cash < entry_comm:
                 bar += 1
                 continue
             cash -= entry_comm
 
-            # Find exit: vectorized forward scan
             exit_idx, exit_price = self._find_exit(bar, side, stop, tp)
-
-            # Apply slippage to exit
             exit_price_adj = exit_price * (1.0 - side * slip)
 
-            # PnL and commission
             pnl = (exit_price_adj - entry_price) * side * size
             exit_comm = abs(exit_price_adj * size * comm)
             net_pnl = pnl - exit_comm
@@ -204,19 +239,8 @@ class VectorizedBacktester:
 
             bars_since_trade = 0
             bar = exit_idx + 1
-            continue
 
-        # --- Phase 2: Build equity curve (numpy) ---
-        equity = self._build_equity_curve(trades, c)
-
-        self.cash = cash
-        self.max_drawdown = 0.0
-        if len(equity) > 0:
-            peak = np.maximum.accumulate(equity)
-            dd_arr = (peak - equity) / np.where(peak > 0, peak, 1.0)
-            self.max_drawdown = float(np.max(dd_arr))
-
-        return equity, trades
+        return trades, cash
 
     def _find_exit(self, entry_idx: int, side: int, stop: float, tp: float) -> Tuple[int, float]:
         """Find the exit bar and price using vectorized forward scan.
