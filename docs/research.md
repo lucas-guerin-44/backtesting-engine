@@ -131,11 +131,13 @@ In order of impact:
 4. **Testing every strategy on every asset**, the "right" strategy for an asset class isn't always the obvious one. Mean Reversion on EURUSD was the "obvious" choice and the worst performer. Donchian Breakout was the actual winner.
 5. **Weight capping on allocators**, Risk Parity and Correlation-Aware allocators were putting 50-68% into low-volatility assets and starving the portfolio of exposure. Capping individual weights at 30% and redistributing the excess turned Risk Parity from 4 trades and -0.78% to 138 trades and +11.35%.
 
-## What This Doesn't Prove
+## Limitations
 
-- **Gold beta, not alpha.** A long-only momentum strategy with a 200 EMA filter on gold during a 13-year bull market is partially capturing beta. The risk-adjusted improvement over buy & hold is real (much lower drawdown), but the raw return is largely riding the secular trend. The strategy would sit flat or produce small losses during a sustained gold bear market.
-- **The signal is regime-dependent.** Walk-forward splits show the momentum signal works during strong trends (2024-2025) and fails during chop (2017-2018, 2021-2022). Signal params don't converge across splits, which means there isn't one stable "momentum signal" on gold, it's a strategy that works in certain environments.
-- **Slippage is understated.** The model uses fixed 2-5 bps costs. Momentum strategies by design enter on breakouts, exactly when spreads widen and market impact is highest. A sensitivity analysis at 2-5x the modeled slippage would give a more realistic cost estimate.
-- **n=3 splits is not a sample size.** The OOS Sharpe of 0.28 is a mean of three values (-0.07, -0.35, 1.26). The confidence interval around that mean is extremely wide. Three data points cannot establish statistical significance on their own.
-- **The holdout is one period.** The 2023-2025 holdout shows strong results, but it's a single test on a period that happened to be one of the strongest gold rallies in history. One positive holdout doesn't validate a strategy.
-- Walk-forward validation reduces overfitting but doesn't eliminate it. Paper trading is the next step.
+- **Gold results are mostly beta.** A long-only strategy on gold during a 13-year bull market is largely riding the trend, not generating alpha. The lower drawdown vs buy & hold is real, but the return is not independent of the market direction.
+- **The signal is regime-dependent.** Momentum on gold works during strong trends and fails during chop. The parameters don't stabilize across walk-forward splits — there isn't one persistent signal, it's a strategy that suits certain environments.
+- **Strategy mining.** Four strategies were tested on each asset before picking the winners. The 200 EMA filter was chosen because it improved everything. The walk-forward split parameters were tuned. All of these are research decisions made by looking at the data, and the walk-forward can't account for them.
+- **Costs are underestimated.** Fixed 2-5 bps slippage doesn't reflect the reality that breakout/momentum entries happen during volatility spikes when spreads are wider. No overnight funding costs are modeled.
+- **Three walk-forward splits is not a large sample.** The OOS averages have wide confidence intervals. Three data points can't prove much statistically.
+- **The statistical tests have assumptions that don't fully hold.** The bootstrap assumes returns are independent (they're not — volatility clusters). The walk-forward has no gap between training and test windows, so there's some leakage at the boundary. These are known issues I haven't addressed in the implementation.
+
+This is primarily a software engineering project. The quant methodology is best-effort — I've tried to flag where it falls short rather than pretend otherwise.
