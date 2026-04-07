@@ -7,7 +7,7 @@ A multi-asset, event-driven backtesting engine for evaluating trading strategies
 Built with Python. Data sourced from [lucas-guerin-44/datalake-api](https://github.com/lucas-guerin-44/datalake-api).
 
 ![Strategy Comparison](docs/strategy_comparison.png)
-*Equity curves for all four strategies + buy & hold on XAUUSD D1 (2012-2025) with 5bps commission and 2bps slippage. Momentum survives walk-forward validation (OOS Sharpe 2.0, negative degradation) and a true holdout test (2023-2025: +66% return, Sharpe 1.7).*
+*Equity curves for all four strategies + buy & hold on XAUUSD D1 (2012-2025) with 5bps commission and 2bps slippage. See [research process](docs/research.md) for walk-forward validation results and methodology discussion.*
 
 ## What This Does
 
@@ -377,7 +377,7 @@ The only honest way to evaluate parameter tuning. Splits data into rolling train
 1. **Train**: optimize parameters on the training portion (in-sample)
 2. **Test**: evaluate those parameters on unseen data (out-of-sample)
 
-The gap between in-sample and out-of-sample performance is the **degradation** (IS - OOS) — a direct measure of overfitting. Positive degradation means the optimizer is curve-fitting; near-zero means minimal overfitting; negative means the strategy performed *better* out-of-sample than in-sample (the best outcome).
+The gap between in-sample and out-of-sample performance is the **degradation** (IS - OOS) — a direct measure of overfitting. Positive degradation means the optimizer is curve-fitting; near-zero means minimal overfitting; negative means OOS outperformed IS (can indicate a strong signal, or that IS periods happened to be tougher regimes — not unambiguously good).
 
 ```python
 from optimizer import walk_forward
@@ -511,7 +511,7 @@ The model is pulled automatically on first run. After backtests complete, the an
 
 ## Research
 
-See [docs/research.md](docs/research.md) for a detailed write-up of the research process: how walk-forward validation went from "everything is overfit" to validated edges on gold and FX, including the diagnosis (insufficient data, degenerate parameters, wrong strategies on wrong assets) and the fixes that worked.
+See [docs/research.md](docs/research.md) for a write-up of the research process: diagnosing overfitting (insufficient data, degenerate parameters, data contamination), fixing the methodology, and understanding what the results actually show vs. what they don't.
 
 ## Known Limitations
 
