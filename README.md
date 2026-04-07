@@ -1,4 +1,4 @@
-# Backtesting Engine 2.0
+# Backtesting Engine
 
 [![Tests](https://github.com/lucas-guerin-44/backtesting-engine/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-guerin-44/backtesting-engine/actions/workflows/test.yml)
 
@@ -73,6 +73,13 @@ python examples/demo.py            # Single-asset: backtest, optimize, walk-forw
 python examples/portfolio_demo.py  # Multi-asset: 6 instruments, 4 allocators, portfolio walk-forward
 ```
 
+### Docker
+
+```bash
+cp .env.example .env   # Set DATALAKE_URL
+docker compose up      # API on :8001, dashboard on :8501
+```
+
 ## Included Strategies
 
 | Strategy | Description |
@@ -130,6 +137,7 @@ from optimizer import optimize, walk_forward
 result = optimize(
     MomentumStrategy, param_space={"lookback": (5, 40), "entry_threshold": (0.01, 0.06)},
     df=df, n_trials=500, objective="sharpe",  # also: "return", "calmar", "sortino"
+    engine="vectorized",  # ~3x faster than event-driven (default: "event")
 )
 
 wf = walk_forward(
@@ -184,7 +192,11 @@ make frontend  # streamlit run frontend.py
 | `GET` | `/instruments` | List available instruments |
 | `GET` | `/timeframes?instrument=X` | List timeframes for an instrument |
 | `GET` | `/param_space/{strategy}` | Get parameter schema |
-| `POST` | `/backtest/run` | Run backtest, returns metrics + equity curve + trades |
+| `POST` | `/backtest/run` | Submit backtest, returns `task_id` for async polling |
+| `POST` | `/backtest/run?sync=true` | Run backtest synchronously, returns results inline |
+| `GET` | `/backtest/{task_id}` | Poll task status (`running`, `complete`, `failed`) |
+
+Backtests run asynchronously by default (ThreadPoolExecutor, 4 workers). Submit multiple backtests and poll each independently.
 
 ## Research
 

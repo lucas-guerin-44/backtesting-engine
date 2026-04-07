@@ -2,12 +2,13 @@
 
 import hashlib
 import json
-
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from backtesting.backtest import Backtester
@@ -19,6 +20,12 @@ app = FastAPI(title="Backtesting API")
 
 INSTRUMENTS = ["XAUUSD"]
 TIMEFRAMES = ["M1", "M5", "M15", "H1", "H4", "D1"]
+
+# ---------------------------------------------------------------------------
+# Async task infrastructure
+# ---------------------------------------------------------------------------
+_task_store: Dict[str, Dict[str, Any]] = {}
+_executor = ThreadPoolExecutor(max_workers=4)
 
 
 class BacktestRequest(BaseModel):
@@ -76,18 +83,17 @@ def param_space(strategy_name: str):
     return {"strategy": strategy_name, "params": get_strategy_param_space(strategy_cls)}
 
 
-@app.post("/backtest/run")
-def run_backtest(req: BacktestRequest):
-    """Execute a backtest and return metrics, equity curve, and trade list."""
+def _execute_backtest(req: BacktestRequest) -> dict:
+    """Core backtest logic. Returns the result dict or raises on error."""
     strategy_cls = STRATEGY_REGISTRY.get(req.strategy)
     starting_cash = req.starting_cash if req.starting_cash > 0 else 10_000
 
     if not strategy_cls:
-        raise HTTPException(status_code=404, detail="Strategy not found")
+        raise ValueError("Strategy not found")
 
     df = fetch_ohlc(req.instrument, req.timeframe, req.start.isoformat(), req.end.isoformat())
     if df.empty:
-        raise HTTPException(status_code=400, detail="No data for requested range")
+        raise ValueError("No data for requested range")
 
     df = df.set_index(pd.to_datetime(df["timestamp"])).sort_index()
 
@@ -125,3 +131,56 @@ def run_backtest(req: BacktestRequest):
         "equity_curve": equity_df.to_dict(orient="records"),
         "trades": trades_list,
     })
+
+
+def _run_backtest_task(task_id: str, req: BacktestRequest) -> None:
+    """Run a backtest in a background thread, updating the task store."""
+    try:
+        result = _execute_backtest(req)
+        _task_store[task_id] = {"status": "complete", "result": result, "error": None}
+    except Exception as exc:
+        _task_store[task_id] = {"status": "failed", "result": None, "error": str(exc)}
+
+
+@app.post("/backtest/run")
+def run_backtest(req: BacktestRequest, sync: bool = Query(False)):
+    """Execute a backtest.
+
+    By default the backtest is launched asynchronously and a task_id is
+    returned immediately.  Pass ``?sync=true`` to run inline and get
+    the result directly (backwards-compatible behaviour).
+    """
+    # --- synchronous path (backwards compatible) ---
+    if sync:
+        strategy_cls = STRATEGY_REGISTRY.get(req.strategy)
+        if not strategy_cls:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        try:
+            return _execute_backtest(req)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    # --- asynchronous path ---
+    strategy_cls = STRATEGY_REGISTRY.get(req.strategy)
+    if not strategy_cls:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    task_id = str(uuid.uuid4())
+    _task_store[task_id] = {"status": "running", "result": None, "error": None}
+    _executor.submit(_run_backtest_task, task_id, req)
+    return {"task_id": task_id, "status": "running"}
+
+
+@app.get("/backtest/{task_id}")
+def get_backtest_status(task_id: str):
+    """Poll for the status / result of an async backtest."""
+    task = _task_store.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    response: Dict[str, Any] = {"task_id": task_id, "status": task["status"]}
+    if task["status"] == "complete":
+        response["result"] = task["result"]
+    elif task["status"] == "failed":
+        response["error"] = task["error"]
+    return response

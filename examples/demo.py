@@ -131,7 +131,7 @@ def main():
     }
     fixed_params = {"trend_filter_period": 200}
 
-    print(f"Running 1000 Optuna trials (Bayesian search)...")
+    print(f"Running 1000 Optuna trials (vectorized engine, Bayesian search)...")
     t0 = time.perf_counter()
     result = optimize(
         MomentumStrategy, full_param_space, df,
@@ -139,6 +139,7 @@ def main():
         commission_bps=5.0, slippage_bps=2.0,
         fixed_params=fixed_params,
         min_trades=10, top_k_avg=5,
+        engine="vectorized",
     )
     elapsed = time.perf_counter() - t0
 
@@ -198,6 +199,7 @@ def main():
             MomentumStrategy, full_param_space, train_df,
             n_trials=500, objective="sharpe", commission_bps=5.0, slippage_bps=2.0,
             fixed_params=fixed_params, min_trades=10, top_k_avg=5, symbol=INSTRUMENT,
+            engine="vectorized",
         )
 
         # Stage 2: lock signal params from stage 1, optimize risk_per_trade
@@ -210,6 +212,7 @@ def main():
             MomentumStrategy, {"risk_per_trade": (0.01, 0.05)}, train_df,
             n_trials=200, objective="sharpe", commission_bps=5.0, slippage_bps=2.0,
             fixed_params=locked_fixed, min_trades=10, top_k_avg=5, symbol=INSTRUMENT,
+            engine="vectorized",
         )
 
         # Evaluate on test data (never seen by either stage)
@@ -276,7 +279,7 @@ def main():
     print()
 
     # Optimize on train with full param space
-    print("Optimizing on training data (1000 trials)...")
+    print("Optimizing on training data (1000 trials, vectorized)...")
     t0 = time.perf_counter()
     holdout_opt = optimize(
         MomentumStrategy, full_param_space, train_df,
@@ -284,6 +287,7 @@ def main():
         commission_bps=5.0, slippage_bps=2.0,
         fixed_params=fixed_params,
         min_trades=10, top_k_avg=5,
+        engine="vectorized",
     )
     elapsed = time.perf_counter() - t0
     print(f"Completed in {elapsed:.1f}s")

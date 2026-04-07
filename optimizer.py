@@ -42,6 +42,7 @@ Example usage::
     )
 """
 
+import inspect
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
@@ -51,12 +52,36 @@ import optuna
 import pandas as pd
 
 from backtesting.backtest import Backtester
+from backtesting.indicators import ema_array
 from backtesting.statistics import compute_sharpe
+from backtesting.vectorized import VectorizedBacktester
+from backtesting.vectorized_signals import (
+    trend_following_signals, mean_reversion_signals,
+    momentum_signals, donchian_signals,
+)
 from utils import infer_freq_per_year
 
 # Suppress Optuna's verbose trial logging (we log summaries ourselves)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Vectorized signal dispatch
+# ---------------------------------------------------------------------------
+
+_VECTORIZED_SIGNALS = {
+    "TrendFollowingStrategy": trend_following_signals,
+    "MeanReversionStrategy": mean_reversion_signals,
+    "MomentumStrategy": momentum_signals,
+    "DonchianBreakoutStrategy": donchian_signals,
+}
+
+# Parameters that belong to the backtester / risk-management layer, not the
+# signal generator.  These are stripped before calling signal functions.
+_NON_SIGNAL_PARAMS = {
+    "risk_per_trade", "max_dd_halt", "cooldown_bars",
+    "trend_filter_period", "use_trailing_stop", "allow_reentry",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +259,7 @@ def optimize(
     n_jobs: int = 1,
     min_trades: int = 0,
     top_k_avg: int = 1,
+    engine: str = "event",
 ) -> OptimizationResult:
     """Optimize strategy parameters using Bayesian search (Optuna TPE).
 
@@ -270,8 +296,30 @@ def optimize(
     if obj_fn is None:
         raise ValueError(f"Unknown objective '{objective}'. Choose from: {list(OBJECTIVES)}")
 
+    if engine not in ("event", "vectorized"):
+        raise ValueError(f"Unknown engine '{engine}'. Choose 'event' or 'vectorized'.")
+
     fixed = fixed_params or {}
     freq = infer_freq_per_year(df.index)
+
+    # Pre-extract OHLC arrays once for vectorized engine
+    if engine == "vectorized":
+        strat_name = strategy_cls.__name__
+        sig_fn = _VECTORIZED_SIGNALS.get(strat_name)
+        if sig_fn is None:
+            raise ValueError(
+                f"No vectorized signal function for '{strat_name}'. "
+                f"Supported: {list(_VECTORIZED_SIGNALS)}"
+            )
+        _col = {c.lower(): c for c in df.columns}
+        _ohlc_open = df[_col["open"]].to_numpy(dtype=np.float64)
+        _ohlc_high = df[_col["high"]].to_numpy(dtype=np.float64)
+        _ohlc_low = df[_col["low"]].to_numpy(dtype=np.float64)
+        _ohlc_close = df[_col["close"]].to_numpy(dtype=np.float64)
+        # Discover which kwargs the signal function actually accepts
+        _sig_params = set(inspect.signature(sig_fn).parameters.keys()) - {
+            "open", "high", "low", "close",
+        }
 
     def _objective(trial: optuna.Trial) -> float:
         params = {name: _suggest_param(trial, name, bounds)
@@ -281,11 +329,45 @@ def optimize(
         params.update(fixed)
 
         try:
-            strategy = strategy_cls(**params)
-            bt = Backtester(df, strategy, starting_cash=starting_cash,
-                            commission_bps=commission_bps, slippage_bps=slippage_bps,
-                            symbol=symbol)
-            equity_curve, trades = bt.run()
+            if engine == "vectorized":
+                # Filter params to only those the signal function accepts
+                sig_kwargs = {k: v for k, v in params.items()
+                              if k in _sig_params}
+                entries, sides, stops, tps = sig_fn(
+                    _ohlc_open, _ohlc_high, _ohlc_low, _ohlc_close,
+                    **sig_kwargs,
+                )
+
+                # Post-processing: apply trend filter if requested
+                tfp = params.get("trend_filter_period", 0)
+                if tfp and tfp > 0:
+                    trend_ema = ema_array(_ohlc_close, int(tfp))
+                    # Mask out longs where close < ema, shorts where close > ema
+                    long_mask = (_ohlc_close < trend_ema) & (sides == 1)
+                    short_mask = (_ohlc_close > trend_ema) & (sides == -1)
+                    block = long_mask | short_mask
+                    entries = entries & ~block
+                    sides = np.where(block, 0, sides)
+
+                bt = VectorizedBacktester(
+                    _ohlc_open, _ohlc_high, _ohlc_low, _ohlc_close,
+                    starting_cash=starting_cash,
+                    commission_bps=commission_bps,
+                    slippage_bps=slippage_bps,
+                )
+                equity_curve, trades = bt.run(
+                    entries, sides, stops, tps,
+                    risk_per_trade=params.get("risk_per_trade", 0.02),
+                    max_dd_halt=params.get("max_dd_halt", 0.15),
+                    cooldown_bars=params.get("cooldown_bars", 10),
+                )
+            else:
+                strategy = strategy_cls(**params)
+                bt = Backtester(df, strategy, starting_cash=starting_cash,
+                                commission_bps=commission_bps, slippage_bps=slippage_bps,
+                                symbol=symbol)
+                equity_curve, trades = bt.run()
+
             score = obj_fn(equity_curve, trades, freq_per_year=freq)
             if not np.isfinite(score):
                 return -999.0
@@ -336,6 +418,7 @@ def walk_forward(
     min_trades: int = 0,
     top_k_avg: int = 1,
     anchored: bool = False,
+    engine: str = "event",
 ) -> WalkForwardResult:
     """Walk-forward optimization: the only honest way to evaluate parameter tuning.
 
@@ -414,16 +497,57 @@ def walk_forward(
             n_trials=n_trials, objective=objective, starting_cash=starting_cash,
             commission_bps=commission_bps, slippage_bps=slippage_bps,
             symbol=symbol, fixed_params=fixed_params, n_jobs=n_jobs,
-            min_trades=min_trades, top_k_avg=top_k_avg,
+            min_trades=min_trades, top_k_avg=top_k_avg, engine=engine,
         )
 
         # 2. Evaluate best params on test data (out-of-sample)
         best_params = {**opt_result.best_params, **fixed}
-        strategy = strategy_cls(**best_params)
-        bt = Backtester(test_df, strategy, starting_cash=starting_cash,
-                        commission_bps=commission_bps, slippage_bps=slippage_bps,
-                        symbol=symbol)
-        eq, trades = bt.run()
+
+        if engine == "vectorized":
+            sig_fn = _VECTORIZED_SIGNALS[strategy_cls.__name__]
+            _sig_params = set(inspect.signature(sig_fn).parameters.keys()) - {
+                "open", "high", "low", "close",
+            }
+            t_col = {c.lower(): c for c in test_df.columns}
+            t_open = test_df[t_col["open"]].to_numpy(dtype=np.float64)
+            t_high = test_df[t_col["high"]].to_numpy(dtype=np.float64)
+            t_low = test_df[t_col["low"]].to_numpy(dtype=np.float64)
+            t_close = test_df[t_col["close"]].to_numpy(dtype=np.float64)
+
+            sig_kwargs = {k: v for k, v in best_params.items()
+                          if k in _sig_params}
+            entries, sides, stops, tps = sig_fn(
+                t_open, t_high, t_low, t_close, **sig_kwargs,
+            )
+
+            tfp = best_params.get("trend_filter_period", 0)
+            if tfp and tfp > 0:
+                trend_ema = ema_array(t_close, int(tfp))
+                long_mask = (t_close < trend_ema) & (sides == 1)
+                short_mask = (t_close > trend_ema) & (sides == -1)
+                block = long_mask | short_mask
+                entries = entries & ~block
+                sides = np.where(block, 0, sides)
+
+            bt = VectorizedBacktester(
+                t_open, t_high, t_low, t_close,
+                starting_cash=starting_cash,
+                commission_bps=commission_bps,
+                slippage_bps=slippage_bps,
+            )
+            eq, trades = bt.run(
+                entries, sides, stops, tps,
+                risk_per_trade=best_params.get("risk_per_trade", 0.02),
+                max_dd_halt=best_params.get("max_dd_halt", 0.15),
+                cooldown_bars=best_params.get("cooldown_bars", 10),
+            )
+        else:
+            strategy = strategy_cls(**best_params)
+            bt = Backtester(test_df, strategy, starting_cash=starting_cash,
+                            commission_bps=commission_bps, slippage_bps=slippage_bps,
+                            symbol=symbol)
+            eq, trades = bt.run()
+
         oos_score = obj_fn(eq, trades, freq_per_year=freq)
 
         split_result = {

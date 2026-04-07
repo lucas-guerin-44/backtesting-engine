@@ -33,3 +33,6 @@ ohlc_data/*
 !ohlc_data/*_D1.csv
 artifacts/
 trade_charts/
+
+# Docker local overrides
+docker-compose.override.yml
