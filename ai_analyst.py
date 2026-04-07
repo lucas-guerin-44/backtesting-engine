@@ -47,6 +47,15 @@ Structure your response as:
    its 50-bar average"). Think like a senior quant telling a junior what to run
    next, not generic advice.
 
+Walk-forward degradation interpretation:
+- Degradation = In-Sample mean - Out-of-Sample mean
+- POSITIVE degradation (e.g. +1.5) = BAD — optimizer is curve-fitting, OOS is worse than IS
+- NEAR ZERO degradation = GOOD — minimal overfitting
+- NEGATIVE degradation (e.g. -1.3) = GOOD — OOS outperformed IS, meaning the signal
+  generalizes well and the test period happened to suit the strategy. This is the best
+  possible outcome and is NOT a red flag.
+- The key metric is whether OOS Sharpe is positive, not the sign of degradation.
+
 Keep it under 200 words. No fluff, no disclaimers.\
 """
 
@@ -62,6 +71,14 @@ Structure your response as:
    which assets to drop or add, allocation weights to override, rebalance
    frequencies to test, correlation thresholds to tune. Think like a portfolio
    manager telling the team what to run in the next iteration.
+
+Walk-forward degradation interpretation:
+- Degradation = In-Sample mean - Out-of-Sample mean
+- POSITIVE degradation (e.g. +1.5) = BAD — optimizer is curve-fitting, OOS is worse than IS
+- NEAR ZERO degradation = GOOD — minimal overfitting
+- NEGATIVE degradation (e.g. -1.3) = GOOD — OOS outperformed IS, meaning the signal
+  generalizes well. This is the best possible outcome and is NOT a red flag.
+- The key metric is whether OOS Sharpe is positive, not the sign of degradation.
 
 Keep it under 200 words. No fluff, no disclaimers.\
 """

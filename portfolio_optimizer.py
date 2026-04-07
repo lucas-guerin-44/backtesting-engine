@@ -22,7 +22,7 @@ from backtesting.allocation import (
     EqualWeightAllocator,
 )
 from backtesting.portfolio_backtest import PortfolioBacktester
-from optimizer import OBJECTIVES, _suggest_param, _average_top_k_params
+from optimizer import OBJECTIVES, _suggest_param, _average_top_k_params, _check_constraints
 from utils import compute_sharpe, infer_freq_per_year
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -83,6 +83,8 @@ def _build_strategies_from_trial(
         for name, bounds in config.param_space.items():
             prefixed = f"{sym}__{name}"
             params[name] = _suggest_param(trial, prefixed, bounds)
+        if not _check_constraints(params):
+            return None, None
         params.update(config.fixed_params)
         strategies[sym] = config.strategy_cls(**params)
         all_params[sym] = params
@@ -139,6 +141,8 @@ def portfolio_optimize(
     def _objective(trial: optuna.Trial) -> float:
         try:
             strategies, _ = _build_strategies_from_trial(trial, strategy_configs)
+            if strategies is None:
+                return -999.0
 
             if optimize_weights:
                 raw_w = {s: trial.suggest_float(f"weight__{s}", 0.05, 1.0)

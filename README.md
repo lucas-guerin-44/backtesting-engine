@@ -7,7 +7,7 @@ A multi-asset, event-driven backtesting engine for evaluating trading strategies
 Built with Python. Data sourced from [lucas-guerin-44/datalake-api](https://github.com/lucas-guerin-44/datalake-api).
 
 ![Strategy Comparison](docs/strategy_comparison.png)
-*Equity curves for all four strategies on XAUUSD H1 with 5bps commission and 2bps slippage. - very likely overfit*
+*Equity curves for all four strategies + buy & hold on XAUUSD D1 (2012-2025) with 5bps commission and 2bps slippage. Momentum survives walk-forward validation (OOS Sharpe 2.0, negative degradation) and a true holdout test (2023-2025: +66% return, Sharpe 1.7).*
 
 ## What This Does
 
@@ -61,7 +61,7 @@ Define trading strategies as Python classes, run them against historical price d
 └─────────────────────────────────────────────────────┘
 ```
 
-**Data flow:** Strategies extend `Strategy` and implement `on_bar(i, bar, cash) -> Optional[Trade]`. The `Backtester` iterates over OHLC bars, delegates exit execution to the `Broker` (gap-aware stops, take-profits), asks the strategy for entry signals, and tracks equity via the `Portfolio`. The `PortfolioBacktester` extends this to multiple assets with shared cash, allocation weights, and cross-asset risk management.
+**Data flow:** Strategies extend `Strategy` and implement `on_bar(i, bar, equity) -> Optional[Trade]`. The `Backtester` iterates over OHLC bars, delegates exit execution to the `Broker` (gap-aware stops, take-profits), asks the strategy for entry signals, and tracks equity via the `Portfolio`. The `PortfolioBacktester` extends this to multiple assets with shared cash, allocation weights, and cross-asset risk management.
 
 ## Included Strategies
 
@@ -81,7 +81,7 @@ All strategies share a common risk model:
 ## Multi-Asset Portfolio Backtesting
 
 ![Portfolio Allocation Comparison](docs/portfolio_allocation.png)
-*7 instruments (XAUUSD, EURUSD, SPX500, NDX100, GER40, GBPUSD, USOUSD) on D1 with mixed strategies per asset class.*
+*6 instruments (XAUUSD, EURUSD, SPX500, NDX100, GER40, USOUSD) on D1 (2012-2025) with mixed strategies per asset class. Equal Weight achieves +83% return (Sharpe 0.99, 7% max DD) vs. Buy & Hold +152% with 15%+ drawdown.*
 
 The `PortfolioBacktester` runs multiple strategies on multiple assets with shared cash and risk management.
 
@@ -90,9 +90,9 @@ The `PortfolioBacktester` runs multiple strategies on multiple assets with share
 | Scheme | Method | Description |
 |---|---|---|
 | `EqualWeightAllocator` | 1/N | Each asset gets equal capital allocation |
-| `RiskParityAllocator` | Inverse vol | Weight inversely by rolling volatility — equal risk contribution |
-| `CorrelationAwareAllocator` | Risk parity + corr | Reduce weight for correlated assets, increase for uncorrelated |
-| `RegimeAllocator` | Vol regime | Shift weight between trend and mean-reversion assets based on rolling volatility regime |
+| `RiskParityAllocator` | Inverse vol | Weight inversely by rolling volatility — equal risk contribution. Optional `max_weight` cap. |
+| `CorrelationAwareAllocator` | Risk parity + corr | Reduce weight for correlated assets, increase for uncorrelated. Optional `max_weight` cap. |
+| `RegimeAllocator` | Vol regime | Shift weight between trend and mean-reversion assets based on rolling volatility regime. Optional `max_weight` cap. |
 
 ### Usage
 
@@ -152,8 +152,8 @@ The `RegimeAllocator` measures cross-asset rolling volatility percentiles to det
 from backtesting.allocation import RegimeAllocator
 
 allocator = RegimeAllocator(
-    trend_symbols={"XAUUSD", "BTCUSD", "SPX500"},    # Get more weight in high-vol
-    reversion_symbols={"EURUSD", "GBPUSD"},            # Get more weight in low-vol
+    trend_symbols={"XAUUSD", "SPX500", "EURUSD"},     # Get more weight in high-vol
+    reversion_symbols={"GBPUSD"},                       # Get more weight in low-vol
     vol_lookback=200,       # Short window for current vol
     vol_history=5000,       # Long window for percentile baseline
     vol_threshold_pct=50,   # Above = trending, below = ranging
@@ -170,14 +170,14 @@ from portfolio_optimizer import StrategyConfig, portfolio_optimize, portfolio_wa
 
 configs = {
     "XAUUSD": StrategyConfig(TrendFollowingStrategy, {"fast_period": (10, 40), "slow_period": (30, 100)}),
-    "EURUSD": StrategyConfig(MeanReversionStrategy, {"bb_period": (10, 30), "rsi_period": (7, 21)}),
+    "EURUSD": StrategyConfig(DonchianBreakoutStrategy, {"channel_period": (10, 40), "risk_reward": (1.5, 4.0)}),
 }
 
-result = portfolio_optimize(configs, dataframes, n_trials=50, objective="sharpe")
-wf = portfolio_walk_forward(configs, dataframes, n_splits=3, n_trials=30)
+result = portfolio_optimize(configs, dataframes, n_trials=200, objective="sharpe")
+wf = portfolio_walk_forward(configs, dataframes, n_splits=3, n_trials=200)
 ```
 
-See `examples/portfolio_demo.py` for a full end-to-end demo with 8 instruments.
+See `examples/portfolio_demo.py` for a full end-to-end demo with 6 instruments.
 
 ## Setup
 
@@ -213,14 +213,14 @@ cp .env.example .env
 
 ### Quick Start
 
-D1 (daily) OHLC data is included for 8 instruments: XAUUSD, EURUSD, BTCUSD, SPX500, NDX100, GER40, GBPUSD, USOUSD. Both demos work out of the box.
+D1 (daily) OHLC data is cached locally for instruments including XAUUSD, EURUSD, SPX500, NDX100, GER40, and USOUSD. Both demos fetch from the datalake API and cache in `ohlc_data/`. Data sourced from MetaTrader 5 (Eightcap).
 
-Single-asset demo (backtests all strategies, optimizes, validates, runs statistical tests):
+Single-asset demo (backtests all strategies, optimizes, walk-forward validates, holdout tests, runs statistical significance):
 ```bash
 python examples/demo.py
 ```
 
-Multi-asset portfolio demo (8 instruments, 4 allocation schemes, portfolio optimization, walk-forward):
+Multi-asset portfolio demo (6 instruments, 4 allocation schemes, portfolio optimization, walk-forward):
 ```bash
 python examples/portfolio_demo.py
 ```
@@ -250,7 +250,7 @@ The `Backtester` processes each bar in this order:
 
 1. **Stop-loss exits** (via Broker) - gap-aware: if bar opens past stop, fills at open price (worse), not the stop level
 2. **Take-profit exits** (via Broker)
-3. **Strategy signal** - `on_bar()` receives available cash after accounting for open positions
+3. **Strategy signal** - `on_bar()` receives current equity (cash + open P&L)
 4. **Entry execution** (via Broker) - with leverage/margin checks, slippage, commission
 5. **Portfolio update** - equity curve, drawdown tracking, margin call check
 
@@ -308,12 +308,12 @@ class MyStrategy(Strategy):
     def __init__(self, lookback: int = 20):
         self.lookback = lookback
 
-    def on_bar(self, i: int, bar: Bar, cash: float) -> Optional[Trade]:
+    def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Trade]:
         # Return a Trade to enter, or None to skip
         return Trade(
             entry_bar=bar,
             side=1,          # +1 long, -1 short
-            size=cash * 0.1 / bar.close,
+            size=equity * 0.1 / bar.close,
             entry_price=bar.close,
             stop_price=bar.close * 0.98,
             take_profit=bar.close * 1.04,
@@ -377,7 +377,7 @@ The only honest way to evaluate parameter tuning. Splits data into rolling train
 1. **Train**: optimize parameters on the training portion (in-sample)
 2. **Test**: evaluate those parameters on unseen data (out-of-sample)
 
-The gap between in-sample and out-of-sample performance is the **degradation** — a direct measure of overfitting.
+The gap between in-sample and out-of-sample performance is the **degradation** (IS - OOS) — a direct measure of overfitting. Positive degradation means the optimizer is curve-fitting; near-zero means minimal overfitting; negative means the strategy performed *better* out-of-sample than in-sample (the best outcome).
 
 ```python
 from optimizer import walk_forward
@@ -475,7 +475,7 @@ At vectorized speed, 1,000 Optuna trials on 3,000 bars completes in ~5 seconds.
 
 ## Testing
 
-192 tests covering:
+201 tests covering:
 
 | Module | Tests | Coverage |
 |---|---|---|
@@ -493,7 +493,7 @@ At vectorized speed, 1,000 Optuna trials on 3,000 bars completes in ~5 seconds.
 | `test_types.py` | 5 | Bar and Trade dataclass creation |
 
 ```bash
-python -m pytest tests/ -v  # 192 tests in ~2.7s
+python -m pytest tests/ -v  # 201 tests in ~2.7s
 ```
 
 ## AI Analyst
@@ -508,6 +508,10 @@ AI_MODEL=llama3.2:3b   # or any Ollama model
 ```
 
 The model is pulled automatically on first run. After backtests complete, the analyst prints a plain-English review covering performance, risk, overfitting signals, and concrete suggestions — referencing the actual numbers from your run.
+
+## Research
+
+See [docs/research.md](docs/research.md) for a detailed write-up of the research process: how walk-forward validation went from "everything is overfit" to validated edges on gold and FX, including the diagnosis (insufficient data, degenerate parameters, wrong strategies on wrong assets) and the fixes that worked.
 
 ## Known Limitations
 

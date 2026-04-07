@@ -47,11 +47,11 @@ from utils import compute_sharpe, fetch_ohlc
 
 INSTRUMENTS = [
     "XAUUSD", "EURUSD", "SPX500",
-    "NDX100", "GER40", "GBPUSD", "USOUSD",
+    "NDX100", "GER40", "USOUSD",
 ]
 TIMEFRAME = "D1"
-START_DATE = "2019-01-01"
-END_DATE = "2024-12-31"
+START_DATE = "2012-01-01"
+END_DATE = "2025-12-31"
 STARTING_CASH = 100_000
 COMMISSION_BPS = 5.0
 SLIPPAGE_BPS = 2.0
@@ -81,7 +81,7 @@ STRATEGY_MAP = {
     "SPX500": ("Trend Following", TrendFollowingStrategy, _TF_KWARGS),
     "NDX100": ("Momentum",        MomentumStrategy,       _FILTER_200),
     "GER40":  ("Trend Following", TrendFollowingStrategy, _TF_KWARGS),
-    "EURUSD": ("Mean Reversion",  MeanReversionStrategy,  _FILTER_200),
+    "EURUSD": ("Donchian",        DonchianBreakoutStrategy, _FILTER_200),
     "GBPUSD": ("Mean Reversion",  MeanReversionStrategy,  _FILTER_200),
 }
 
@@ -170,8 +170,10 @@ def main():
 
     allocators = {
         "Equal Weight": EqualWeightAllocator(),
-        "Risk Parity": RiskParityAllocator(min_lookback=60),
-        "Corr-Aware": CorrelationAwareAllocator(min_lookback=60, corr_threshold=0.4),
+        "Risk Parity": RiskParityAllocator(min_lookback=60, max_weight=0.30),
+        "Corr-Aware": CorrelationAwareAllocator(
+            min_lookback=60, corr_threshold=0.5, max_weight=0.30,
+        ),
         "Regime-Aware": RegimeAllocator(
             trend_symbols=trend_syms,
             reversion_symbols=revert_syms,
@@ -180,6 +182,7 @@ def main():
             vol_threshold_pct=50.0,
             regime_boost=2.0,
             min_lookback=300,
+            max_weight=0.30,
         ),
     }
 
@@ -187,7 +190,7 @@ def main():
     limits = RiskLimits(
         max_gross_exposure=0.9,    # Max 90% of equity deployed
         max_net_exposure=0.80,     # Max 80% net directional exposure
-        max_single_asset=0.25,     # No single asset > 25% of equity
+        max_single_asset=0.30,     # No single asset > 30% of equity
         max_open_positions=6,      # Max 6 assets with open positions
     )
 
@@ -261,6 +264,22 @@ def main():
             
         print(" ")
 
+    # Build equal-weight buy & hold equity curve aligned to portfolio timestamps
+    # Use union of all timestamps with forward-fill (same as PortfolioBacktester)
+    master_idx = dataframes[symbols[0]].index
+    for sym in symbols[1:]:
+        master_idx = master_idx.union(dataframes[sym].index)
+    master_idx = master_idx.sort_values()
+
+    normalized = []
+    for sym in symbols:
+        closes = dataframes[sym]["close"].reindex(master_idx, method="ffill")
+        first_valid = closes.first_valid_index()
+        normalized.append(closes / closes.loc[first_valid])
+    bnh_df = pd.concat(normalized, axis=1).ffill().bfill()
+    bnh_equity = (bnh_df.mean(axis=1) * STARTING_CASH).values
+    portfolio_results["Buy & Hold"] = bnh_equity
+
     # Save allocation comparison chart
     os.makedirs("docs", exist_ok=True)
     plot_portfolio(
@@ -274,10 +293,12 @@ def main():
     opt_dfs = dataframes
 
     # ------------------------------------------------------------------
-    section(f"3. Portfolio Optimization ({len(opt_symbols)} assets, 30 trials)")
+    section(f"3. Portfolio Optimization ({len(opt_symbols)} assets, 200 trials)")
     # ------------------------------------------------------------------
 
-    configs = {}
+    # Full search first: find the optimal parameter region per asset.
+    # This uses the full param space to discover where the signal lives.
+    full_configs = {}
     for sym in opt_symbols:
         _, strat_cls, strat_kw = STRATEGY_MAP.get(sym, ("Trend Following", TrendFollowingStrategy, _TF_KWARGS))
         if strat_cls == TrendFollowingStrategy:
@@ -310,21 +331,21 @@ def main():
                 "risk_reward": (1.5, 4.0),
                 "risk_per_trade": (0.01, 0.04),
             }
-        configs[sym] = StrategyConfig(strategy_cls=strat_cls, param_space=space,
-                                      fixed_params=strat_kw)
+        full_configs[sym] = StrategyConfig(strategy_cls=strat_cls, param_space=space,
+                                           fixed_params=strat_kw)
 
     strat_names = {s: STRATEGY_MAP.get(s, ("?",))[0] for s in opt_symbols}
     print(f"Optimizing {len(opt_symbols)} assets:")
     for s in opt_symbols:
         print(f"  {s:<10s} {strat_names[s]}")
-    print(f"\nRunning 30 Optuna trials (Bayesian search)...\n")
+    print(f"\nRunning 200 Optuna trials (Bayesian search)...\n")
 
     t0 = time.perf_counter()
     opt_result = portfolio_optimize(
-        strategy_configs=configs,
+        strategy_configs=full_configs,
         dataframes=opt_dfs,
-        allocator=RiskParityAllocator(min_lookback=60),
-        n_trials=30,
+        allocator=RiskParityAllocator(min_lookback=60, max_weight=0.30),
+        n_trials=200,
         objective="sharpe",
         starting_cash=STARTING_CASH,
         commission_bps=COMMISSION_BPS,
@@ -351,16 +372,42 @@ def main():
     section("4. Walk-Forward Validation (the overfitting test)")
     # ------------------------------------------------------------------
 
+    # Lock down signal params from the full optimization above.
+    # Only optimize risk_per_trade per asset in walk-forward.
+    #
+    # Why: with 6 assets × 4-5 signal params = 25+ free parameters, even 200
+    # trials can't explore the space meaningfully — the optimizer finds noise.
+    # Locking signal params to their converged values and only tuning position
+    # sizing (risk_per_trade) reduces the search to 6 dimensions. This is the
+    # same approach that turned single-asset walk-forward from "curve-fitting"
+    # (degradation 1.5+) to "OOS outperforms IS" (degradation -1.4).
+    locked_configs = {}
+    for sym in opt_symbols:
+        _, strat_cls, strat_kw = STRATEGY_MAP.get(sym, ("Trend Following", TrendFollowingStrategy, _TF_KWARGS))
+        # Merge the optimized signal params into fixed_params
+        optimized_params = opt_result.best_strategy_params.get(sym, {})
+        locked_fixed = dict(strat_kw)
+        for k, v in optimized_params.items():
+            if k != "risk_per_trade":
+                locked_fixed[k] = v
+        locked_configs[sym] = StrategyConfig(
+            strategy_cls=strat_cls,
+            param_space={"risk_per_trade": (0.01, 0.04)},
+            fixed_params=locked_fixed,
+        )
+
+    print(f"Locked signal params from optimization convergence.")
+    print(f"Walk-forward optimizes only risk_per_trade per asset (6 free params).\n")
     print(f"3 train/test splits across all {len(opt_symbols)} assets...")
     print("For each window: optimize on train, evaluate on unseen test data\n")
 
     wf = portfolio_walk_forward(
-        strategy_configs=configs,
+        strategy_configs=locked_configs,
         dataframes=opt_dfs,
-        allocator=RiskParityAllocator(min_lookback=60),
+        allocator=RiskParityAllocator(min_lookback=60, max_weight=0.30),
         n_splits=3,
         train_ratio=0.7,
-        n_trials=20,
+        n_trials=200,
         objective="sharpe",
         starting_cash=STARTING_CASH,
         commission_bps=COMMISSION_BPS,

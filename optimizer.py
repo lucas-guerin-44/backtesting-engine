@@ -136,6 +136,25 @@ def _suggest_param(trial: optuna.Trial, name: str, bounds) -> Any:
     return trial.suggest_float(name, float(low), float(high))
 
 
+# Constraints: list of (param_a, param_b, min_gap) tuples.
+# If both params are present in a trial, require param_b - param_a >= min_gap.
+# Used to prevent degenerate parameter combinations (e.g. fast_period ≈ slow_period).
+PARAM_CONSTRAINTS = [
+    ("fast_period", "slow_period", 15),
+]
+
+
+def _check_constraints(params: Dict[str, Any], prefix: str = "") -> bool:
+    """Return True if all parameter constraints are satisfied."""
+    for param_a, param_b, min_gap in PARAM_CONSTRAINTS:
+        key_a = f"{prefix}{param_a}" if prefix else param_a
+        key_b = f"{prefix}{param_b}" if prefix else param_b
+        if key_a in params and key_b in params:
+            if params[key_b] - params[key_a] < min_gap:
+                return False
+    return True
+
+
 def _average_top_k_params(
     study: optuna.Study,
     param_space: Dict[str, Any],
@@ -256,6 +275,8 @@ def optimize(
     def _objective(trial: optuna.Trial) -> float:
         params = {name: _suggest_param(trial, name, bounds)
                   for name, bounds in param_space.items()}
+        if not _check_constraints(params):
+            return -999.0
         params.update(fixed)
 
         try:

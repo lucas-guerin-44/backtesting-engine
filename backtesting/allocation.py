@@ -26,6 +26,33 @@ class AllocationWeights:
     method: str                # "equal", "risk_parity", "correlation_aware"
 
 
+def _cap_weights(weights: Dict[str, float], max_weight: float) -> Dict[str, float]:
+    """Cap individual weights and redistribute excess proportionally."""
+    if max_weight >= 1.0:
+        return weights
+    capped = dict(weights)
+    for _ in range(10):  # iterate to convergence
+        excess = 0.0
+        uncapped = []
+        for s, w in capped.items():
+            if w > max_weight:
+                excess += w - max_weight
+                capped[s] = max_weight
+            else:
+                uncapped.append(s)
+        if excess <= 0 or not uncapped:
+            break
+        uncapped_total = sum(capped[s] for s in uncapped)
+        if uncapped_total > 0:
+            for s in uncapped:
+                capped[s] += excess * (capped[s] / uncapped_total)
+    # Renormalize
+    total = sum(capped.values())
+    if total > 0:
+        capped = {s: w / total for s, w in capped.items()}
+    return capped
+
+
 class Allocator(ABC):
     """Base class for portfolio allocation weight calculators."""
 
@@ -70,8 +97,9 @@ class RiskParityAllocator(Allocator):
     Falls back to equal weight when fewer than ``min_lookback`` bars are available.
     """
 
-    def __init__(self, min_lookback: int = 20):
+    def __init__(self, min_lookback: int = 20, max_weight: float = 1.0):
         self.min_lookback = min_lookback
+        self.max_weight = max_weight
 
     def compute_weights(self, symbols, close_arrays, lookback, current_idx):
         if current_idx < self.min_lookback:
@@ -91,6 +119,7 @@ class RiskParityAllocator(Allocator):
 
         total = sum(inv_vols.values())
         w = {s: v / total for s, v in inv_vols.items()}
+        w = _cap_weights(w, self.max_weight)
         return AllocationWeights(weights=w, method="risk_parity")
 
 
@@ -106,9 +135,11 @@ class CorrelationAwareAllocator(Allocator):
     Falls back to risk parity with fewer than 2 assets or insufficient data.
     """
 
-    def __init__(self, min_lookback: int = 30, corr_threshold: float = 1.0):
+    def __init__(self, min_lookback: int = 30, corr_threshold: float = 1.0,
+                 max_weight: float = 1.0):
         self.min_lookback = min_lookback
         self.corr_threshold = corr_threshold
+        self.max_weight = max_weight
 
     def compute_weights(self, symbols, close_arrays, lookback, current_idx):
         n = len(symbols)
@@ -166,6 +197,7 @@ class CorrelationAwareAllocator(Allocator):
             # All assets above threshold — fall back to risk parity
             return rp_result
         w = {s: v / total for s, v in raw.items()}
+        w = _cap_weights(w, self.max_weight)
         return AllocationWeights(weights=w, method="correlation_aware")
 
 
@@ -208,6 +240,7 @@ class RegimeAllocator(Allocator):
         vol_threshold_pct: float = 50.0,
         regime_boost: float = 2.0,
         min_lookback: int = 200,
+        max_weight: float = 1.0,
     ):
         self.trend_symbols = set(trend_symbols)
         self.reversion_symbols = set(reversion_symbols)
@@ -216,6 +249,7 @@ class RegimeAllocator(Allocator):
         self.vol_threshold_pct = vol_threshold_pct
         self.regime_boost = regime_boost
         self.min_lookback = min_lookback
+        self.max_weight = max_weight
 
     def compute_weights(self, symbols, close_arrays, lookback, current_idx):
         # Fall back to risk parity during warmup
@@ -248,6 +282,7 @@ class RegimeAllocator(Allocator):
 
         total = sum(raw.values())
         w = {s: v / total for s, v in raw.items()}
+        w = _cap_weights(w, self.max_weight)
         return AllocationWeights(
             weights=w, method=f"regime:{regime}")
 

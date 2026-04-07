@@ -38,17 +38,24 @@ from strategies import (
     TrendFollowingStrategy,
 )
 from ai_analyst import analyze_backtest
-from utils import compute_sharpe
+from utils import compute_sharpe, fetch_ohlc
+
+INSTRUMENT = "XAUUSD"
+TIMEFRAME = "D1"
+START_DATE = "2012-01-01"
+END_DATE = "2025-12-31"
 
 
-def load_data(path="ohlc_data/XAUUSD_D1.csv"):
-    """Load OHLC data from CSV."""
-    if not os.path.exists(path):
-        print(f"ERROR: {path} not found.")
-        print("Place an OHLC CSV with columns: timestamp, open, high, low, close")
+def load_data():
+    """Fetch OHLC data from the datalake."""
+    raw = fetch_ohlc(INSTRUMENT, TIMEFRAME, START_DATE, END_DATE)
+    if raw.empty:
+        print(f"ERROR: No data returned for {INSTRUMENT}")
         sys.exit(1)
-    df = pd.read_csv(path, parse_dates=["timestamp"])
+    df = raw[["timestamp", "open", "high", "low", "close"]].copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df = df.set_index("timestamp").sort_index()
+    df = df[~df.index.duplicated(keep="first")]
     return df
 
 
@@ -63,7 +70,7 @@ def section(title):
 def main():
     df = load_data()
     print(f"Loaded {len(df)} bars: {df.index[0].date()} to {df.index[-1].date()}")
-    print(f"Instrument: XAUUSD D1")
+    print(f"Instrument: {INSTRUMENT} {TIMEFRAME}")
     print(f"Price range: {df['close'].min():.0f} - {df['close'].max():.0f}")
 
     # ------------------------------------------------------------------
@@ -88,7 +95,7 @@ def main():
 
     for name, strat in strategies.items():
         bt = Backtester(df, strat, starting_cash=10_000,
-                        commission_bps=5.0, slippage_bps=2.0, symbol="XAUUSD")
+                        commission_bps=5.0, slippage_bps=2.0, symbol=INSTRUMENT)
         eq, trades = bt.run()
         equity_curves[name] = eq
 
@@ -105,26 +112,37 @@ def main():
 
         print(f"{name:<20s} {ret:>+7.2f}% {bt.max_drawdown*100:>7.2f}% {sharpe:>8.4f} {len(trades):>7d} {win_rate:>6.1f}%")
 
+    # Buy & hold benchmark
+    closes = df["close"]
+    bnh_equity = (closes / closes.iloc[0] * 10_000).to_numpy()
+    equity_curves["Buy & Hold"] = bnh_equity
+    bnh_ret = (closes.iloc[-1] - closes.iloc[0]) / closes.iloc[0] * 100
+    bnh_peak = closes.cummax()
+    bnh_dd = ((bnh_peak - closes) / bnh_peak).max() * 100
+    print(f"{'Buy & Hold':<20s} {bnh_ret:>+7.2f}%   {bnh_dd:>6.2f}%        -       -       -")
+
     os.makedirs("docs", exist_ok=True)
     plot_strategy_comparison(equity_curves, save_path="docs/strategy_comparison.png", show=False)
 
     # ------------------------------------------------------------------
-    section("2. Parameter Optimization (Trend Following)")
+    section("2. Parameter Optimization (Momentum)")
     # ------------------------------------------------------------------
 
-    param_space = {
-        "fast_period": (5, 40),
-        "slow_period": (20, 100),
+    # Full search: find the optimal parameter region
+    full_param_space = {
+        "lookback": (5, 40),
+        "entry_threshold": (0.01, 0.08),
         "atr_stop_mult": (1.0, 5.0),
+        "atr_target_mult": (2.0, 8.0),
         "risk_per_trade": (0.01, 0.05),
     }
-    fixed_params = {"use_trailing_stop": True, "allow_reentry": True}
+    fixed_params = {"trend_filter_period": 200}
 
-    print(f"Running 50 Optuna trials (Bayesian search)...")
+    print(f"Running 1000 Optuna trials (Bayesian search)...")
     t0 = time.perf_counter()
     result = optimize(
-        TrendFollowingStrategy, param_space, df,
-        n_trials=50, objective="sharpe",
+        MomentumStrategy, full_param_space, df,
+        n_trials=1000, objective="sharpe",
         commission_bps=5.0, slippage_bps=2.0,
         fixed_params=fixed_params,
         min_trades=10, top_k_avg=5,
@@ -137,8 +155,8 @@ def main():
     for k, v in result.best_params.items():
         print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
 
-    analyst_metrics["Trend Following"]["optimization"] = {
-        "best_sharpe": result.best_score, "n_trials": 50,
+    analyst_metrics["Momentum"]["optimization"] = {
+        "best_sharpe": result.best_score, "n_trials": 1000,
     }
 
     print(f"\nTop 5 trials:")
@@ -148,15 +166,31 @@ def main():
     section("3. Walk-Forward Validation (the overfitting test)")
     # ------------------------------------------------------------------
 
-    print("Splitting data into 3 train/test windows...")
+    # Lock down the converged params, only optimize risk_per_trade
+    locked_param_space = {"risk_per_trade": (0.01, 0.05)}
+    locked_fixed = {
+        "lookback": result.best_params.get("lookback", 6),
+        "entry_threshold": result.best_params.get("entry_threshold", 0.018),
+        "atr_stop_mult": result.best_params.get("atr_stop_mult", 1.35),
+        "atr_target_mult": result.best_params.get("atr_target_mult", 2.1),
+        "trend_filter_period": 200,
+    }
+
+    print("Locked params from optimization convergence:")
+    for k, v in locked_fixed.items():
+        if k != "trend_filter_period":
+            print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
+    print("Optimizing only: risk_per_trade")
+    print()
+    print("Splitting data into 3 train/test windows (200 trials each)...")
     print("For each window: optimize on train, evaluate on test (unseen data)")
     print()
 
     wf = walk_forward(
-        TrendFollowingStrategy, param_space, df,
-        n_splits=3, train_ratio=0.7, n_trials=30,
+        MomentumStrategy, locked_param_space, df,
+        n_splits=3, train_ratio=0.7, n_trials=200,
         objective="sharpe", commission_bps=5.0, slippage_bps=2.0,
-        fixed_params=fixed_params,
+        fixed_params=locked_fixed,
         min_trades=10, top_k_avg=5, anchored=True,
     )
 
@@ -166,7 +200,7 @@ def main():
     print(f"Out-of-sample mean Sharpe:  {wf.out_of_sample_mean:>8.4f}  (the honest number)")
     print(f"Degradation:                {wf.degradation:>8.4f}  (IS - OOS, measures overfitting)")
     print()
-    analyst_metrics["Trend Following"]["walk_forward"] = {
+    analyst_metrics["Momentum"]["walk_forward"] = {
         "is_mean": wf.in_sample_mean, "oos_mean": wf.out_of_sample_mean,
         "degradation": wf.degradation,
     }
@@ -179,22 +213,72 @@ def main():
         print("Verdict: Negative OOS Sharpe — no reliable edge detected.")
 
     # ------------------------------------------------------------------
-    section("4. Statistical Significance")
+    section("4. True Holdout Test (2012-2022 train, 2023-2025 test)")
+    # ------------------------------------------------------------------
+
+    holdout_split = "2023-01-01"
+    train_df = df[df.index < holdout_split]
+    test_df = df[df.index >= holdout_split]
+    print(f"Train: {train_df.index[0].date()} to {train_df.index[-1].date()} ({len(train_df)} bars)")
+    print(f"Test:  {test_df.index[0].date()} to {test_df.index[-1].date()} ({len(test_df)} bars)")
+    print()
+
+    # Optimize on train with full param space
+    print("Optimizing on training data (1000 trials)...")
+    t0 = time.perf_counter()
+    holdout_opt = optimize(
+        MomentumStrategy, full_param_space, train_df,
+        n_trials=1000, objective="sharpe",
+        commission_bps=5.0, slippage_bps=2.0,
+        fixed_params=fixed_params,
+        min_trades=10, top_k_avg=5,
+    )
+    elapsed = time.perf_counter() - t0
+    print(f"Completed in {elapsed:.1f}s")
+    print(f"In-sample Sharpe: {holdout_opt.best_score:.4f}")
+    print(f"Best params:")
+    for k, v in holdout_opt.best_params.items():
+        print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
+
+    # Evaluate on holdout
+    holdout_params = {**fixed_params, **holdout_opt.best_params}
+    bt_holdout = Backtester(test_df, MomentumStrategy(**holdout_params),
+                            starting_cash=10_000, commission_bps=5.0,
+                            slippage_bps=2.0, symbol=INSTRUMENT)
+    eq_h, trades_h = bt_holdout.run()
+    holdout_ret = (eq_h[-1] - 10_000) / 10_000 * 100
+    holdout_sharpe = compute_sharpe(eq_h)
+    holdout_dd = bt_holdout.max_drawdown * 100
+    wins_h = len([t for t in trades_h if t.pnl and t.pnl > 0])
+    win_rate_h = wins_h / len(trades_h) * 100 if trades_h else 0
+
+    # Holdout B&H
+    h_closes = test_df["close"]
+    h_bnh = (h_closes.iloc[-1] - h_closes.iloc[0]) / h_closes.iloc[0] * 100
+
+    print(f"\nHoldout results (2023-2025, completely unseen):")
+    print(f"  Strategy:   {holdout_ret:>+8.2f}% return, {holdout_dd:.2f}% max DD, "
+          f"Sharpe {holdout_sharpe:.4f}, {len(trades_h)} trades, {win_rate_h:.1f}% win")
+    print(f"  Buy & Hold: {h_bnh:>+8.2f}% return")
+    print(f"  Degradation: {holdout_opt.best_score - holdout_sharpe:.4f} (IS - holdout)")
+
+    # ------------------------------------------------------------------
+    section("5. Statistical Significance")
     # ------------------------------------------------------------------
 
     from backtesting.statistics import compute_statistical_report
 
     # Run the best strategy and check if the edge is real
-    bt = Backtester(df, TrendFollowingStrategy(
-        use_trailing_stop=True, allow_reentry=True), starting_cash=10_000,
-                    commission_bps=5.0, slippage_bps=2.0, symbol="XAUUSD")
+    bt = Backtester(df, MomentumStrategy(trend_filter_period=200),
+                    starting_cash=10_000, commission_bps=5.0, slippage_bps=2.0,
+                    symbol=INSTRUMENT)
     eq, trades = bt.run()
 
-    report = compute_statistical_report(eq, trades, n_trials_tested=50, seed=42)
+    report = compute_statistical_report(eq, trades, n_trials_tested=1000, seed=42)
     print(report)
 
     # ------------------------------------------------------------------
-    section("5. Results Database")
+    section("6. Results Database")
     # ------------------------------------------------------------------
 
     from results_db import ResultsDB
@@ -220,7 +304,7 @@ def main():
         print(db.query_runs()[["strategy_name", "sharpe", "pct_return", "max_drawdown", "total_trades"]].to_string(index=False))
 
     # ------------------------------------------------------------------
-    section("6. Performance: Event-Driven vs Vectorized")
+    section("7. Performance: Event-Driven vs Vectorized")
     # ------------------------------------------------------------------
 
     o = df["open"].to_numpy(dtype=np.float64)
@@ -252,7 +336,7 @@ def main():
     print(f"At vectorized speed, 1000 optimizer trials = ~{1000*vec_time:.0f}s")
 
     # ------------------------------------------------------------------
-    section("7. AI Analyst (if enabled)")
+    section("8. AI Analyst (if enabled)")
     # ------------------------------------------------------------------
 
     analyze_backtest(analyst_metrics)

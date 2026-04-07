@@ -162,9 +162,13 @@ def plot_strategy_comparison(
     fig, ax = plt.subplots(figsize=(14, 6))
 
     for i, (name, equity) in enumerate(results.items()):
-        color = colors[i % len(colors)]
         ret = (equity[-1] - equity[0]) / equity[0] * 100
-        ax.plot(equity, color=color, linewidth=1.2, label=f"{name} ({ret:+.1f}%)")
+        if name == "Buy & Hold":
+            ax.plot(equity, color="gray", linewidth=1.5, linestyle="--",
+                    alpha=0.7, label=f"{name} ({ret:+.1f}%)")
+        else:
+            color = colors[i % len(colors)]
+            ax.plot(equity, color=color, linewidth=1.2, label=f"{name} ({ret:+.1f}%)")
 
     ax.axhline(y=10_000, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
     ax.set_xlabel("Bar")
@@ -244,8 +248,13 @@ def plot_portfolio(
         max_dd = np.max(dd) * 100
 
         label = f"{name} ({ret:+.1f}%, DD {max_dd:.1f}%)"
-        ax1.plot(x, equity, color=color, linewidth=1.4, label=label)
-        ax2.plot(x, -dd * 100, color=color, linewidth=0.9, alpha=0.8)
+        if name == "Buy & Hold":
+            ax1.plot(x, equity, color="gray", linewidth=1.5, linestyle="--",
+                     alpha=0.7, label=label)
+            ax2.plot(x, -dd * 100, color="gray", linewidth=0.9, linestyle="--", alpha=0.5)
+        else:
+            ax1.plot(x, equity, color=color, linewidth=1.4, label=label)
+            ax2.plot(x, -dd * 100, color=color, linewidth=0.9, alpha=0.8)
 
     ax1.axhline(y=starting_cash, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
     ax1.set_ylabel("Portfolio Equity ($)")
