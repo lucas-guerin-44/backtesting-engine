@@ -1,9 +1,14 @@
 """Abstract base class for trading strategies."""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 from backtesting.types import Bar, Trade
+
+if TYPE_CHECKING:
+    from backtesting.order import Order
 
 
 class Strategy(ABC):
@@ -39,7 +44,7 @@ class Strategy(ABC):
     """
 
     @abstractmethod
-    def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Trade]:
+    def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Union[Trade, Order]]:
         """Generate a trading signal for the current bar.
 
         Parameters
@@ -60,7 +65,7 @@ class Strategy(ABC):
         """
         ...
 
-    def on_tick(self, tick, current_bar: Optional[Bar], equity: float) -> Optional[Trade]:
+    def on_tick(self, tick, current_bar: Optional[Bar], equity: float) -> Optional[Union[Trade, Order]]:
         """Called on every tick during tick-level backtesting.
 
         Override this for intra-bar logic. The default does nothing — signal

@@ -50,6 +50,8 @@ from typing import List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from backtesting.latency_broker import LatencyAwareBroker
+from backtesting.order import Order
 from backtesting.portfolio import Portfolio
 from backtesting.strategy import Strategy
 from backtesting.tick import Tick, TickAggregator
@@ -102,6 +104,7 @@ class TickBacktester:
         max_leverage: float = 1.0,
         margin_rate: float = 0.0,
         symbol: str = "default",
+        latency_broker: Optional[LatencyAwareBroker] = None,
     ):
         if config is not None:
             starting_cash = config.starting_cash
@@ -125,6 +128,7 @@ class TickBacktester:
         self.broker = self.portfolio.broker
 
         self.aggregator = TickAggregator(timeframe)
+        self.latency_broker = latency_broker
 
         # Detect whether strategy overrides on_tick / manage_position_tick.
         # If not, we skip those calls entirely in the hot loop.
@@ -213,6 +217,9 @@ class TickBacktester:
         max_drawdown = portfolio.max_drawdown
         has_margin = portfolio.margin_rate > 0
         margin_rate = portfolio.margin_rate
+
+        # Latency broker (optional)
+        latency_broker = self.latency_broker
 
         # Pending trades
         pending_bar_trade: Optional[Trade] = None
@@ -307,6 +314,12 @@ class TickBacktester:
                     open_pos = still_open
                     has_positions = len(open_pos) > 0
 
+            # --- Process latency queue (fill matured orders) ---
+            if latency_broker is not None:
+                latency_broker.process_tick(self.ticks[t_idx])
+                open_pos = positions.get(symbol)
+                has_positions = open_pos is not None and len(open_pos) > 0
+
             # --- Execute pending trades at this tick's price ---
             if pending_bar_trade is not None:
                 self._fill_at_tick_fast(pending_bar_trade, price, timestamps[t_idx])
@@ -342,15 +355,21 @@ class TickBacktester:
                         manage_pos(completed_bar, tr)
 
                 new_trade = on_bar(bar_index, completed_bar, equity)
-                if new_trade is not None and new_trade.size > 0:
-                    pending_bar_trade = new_trade
+                if new_trade is not None:
+                    if latency_broker is not None and isinstance(new_trade, Order):
+                        latency_broker.submit(new_trade, timestamps[t_idx])
+                    elif not isinstance(new_trade, Order) and new_trade.size > 0:
+                        pending_bar_trade = new_trade
                 bar_index += 1
 
             # --- Tick-level signal (only if strategy has on_tick and no bar trade pending) ---
             if has_on_tick and pending_bar_trade is None:
                 tick_trade = on_tick(self.ticks[t_idx], agg.current_bar, equity)
-                if tick_trade is not None and tick_trade.size > 0:
-                    pending_tick_trade = tick_trade
+                if tick_trade is not None:
+                    if latency_broker is not None and isinstance(tick_trade, Order):
+                        latency_broker.submit(tick_trade, timestamps[t_idx])
+                    elif not isinstance(tick_trade, Order) and tick_trade.size > 0:
+                        pending_tick_trade = tick_trade
 
             # --- Drawdown tracking (inlined, no function call) ---
             if equity > peak_equity:

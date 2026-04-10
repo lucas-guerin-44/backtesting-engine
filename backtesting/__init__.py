@@ -1,5 +1,7 @@
 """Backtesting engine for trading strategy evaluation."""
 
+from backtesting.latency_broker import LatencyAwareBroker
+from backtesting.order import Order, OrderType, PendingOrder
 from backtesting.allocation import (
     Allocator,
     AllocationWeights,
@@ -21,6 +23,10 @@ from backtesting.types import Bar, Trade
 
 __all__ = [
     "Allocator",
+    "LatencyAwareBroker",
+    "Order",
+    "OrderType",
+    "PendingOrder",
     "AllocationWeights",
     "Backtester",
     "Bar",
