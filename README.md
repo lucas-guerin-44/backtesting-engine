@@ -2,9 +2,9 @@
 
 [![Tests](https://github.com/lucas-guerin-44/backtesting-engine/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-guerin-44/backtesting-engine/actions/workflows/test.yml)
 
-A multi-asset, event-driven backtesting engine for evaluating trading strategies on historical OHLC and tick data. Supports portfolio-level backtesting with cross-asset allocation, Bayesian optimization, walk-forward validation, and tick-level execution simulation.
+Event-driven backtesting engine with a latency-aware execution layer and a FIFO matching engine core. Built to address the execution realism gap in standard backtesting frameworks: tick-granularity fills, gap-aware stop logic, order-type-aware routing (market/limit/stop), and stochastic latency modeling. See [docs/backtester_engineering.md](docs/backtester_engineering.md) for the full engineering walkthrough.
 
-Built with Python. Data sourced from [lucas-guerin-44/datalake-api](https://github.com/lucas-guerin-44/datalake-api).
+Data sourced from [lucas-guerin-44/datalake-api](https://github.com/lucas-guerin-44/datalake-api).
 
 ![Strategy Comparison](docs/strategy_comparison.png)
 *Equity curves for all four strategies + buy & hold on XAUUSD D1 (2012-2025) with 5bps commission and 2bps slippage. See [research process](docs/research.md) for walk-forward validation results and methodology discussion.*
@@ -13,11 +13,13 @@ Built with Python. Data sourced from [lucas-guerin-44/datalake-api](https://gith
 
 - **Four execution tiers**: event-driven (~300k bars/sec), vectorized (~700k bars/sec), Cython-accelerated (~27M bars/sec), and tick-level (~2.4M ticks/sec). Optional C extensions accelerate indicator computation (EMA, ATR, RSI), trade chaining, and tick stop/TP scanning. 1,000 optimizer trials in ~8s vs ~29s pure Python
 - **Tick-level backtesting**: processes raw tick data, aggregates into OHLC bars at configurable timeframes, fills at next-tick price (not next-bar open), checks stops/TPs on every tick. Strategies receive dual callbacks: `on_tick()` for intra-bar logic and `on_bar()` on bar completion. Existing bar-only strategies work unchanged (default no-op `on_tick()`)
+- **Latency-aware execution layer**: `LatencyAwareBroker` queues orders and fills them after a configurable delay (models network RTT + exchange queue time). Supports `MARKET`, `LIMIT`, and `STOP` order types with conditional fill logic. Market orders fill at `tick.ask`/`tick.bid` when spread data is present. Pluggable latency models: `FixedLatency`, `GaussianLatency`, `LogNormalLatency`, `ComponentLatency` (per-leg decomposition). Built-in `compare_latency_impact()` measures fill latency, slippage vs zero-latency baseline, and Sharpe drag
+- **FIFO order book**: synthetic resting-order layer with price-level queues, partial fills via `max_qty_per_level`, and queue-position-aware matching. Strategies can submit limit orders that rest until price crosses, getting price improvement over market orders
 - **Gap-aware stops**: if price gaps past a stop level, fills at the open (worse price), not the stop
 - **Multi-asset portfolios**: shared cash, cross-asset risk limits, 4 allocation schemes (equal weight, risk parity, correlation-aware, regime-aware)
 - **Bayesian optimization**: Optuna TPE with walk-forward validation and parameter constraints
 - **Statistical testing**: bootstrap CI, permutation test, Deflated Sharpe Ratio (Bailey & Lopez de Prado 2014)
-- **254 tests** across 15 modules in ~4s, includes cross-engine consistency checks (event-driven vs vectorized produce equivalent results), tick-vs-bar convergence tests, walk-forward contamination regression tests (proves OOS data never leaks into training), and indicator edge-case / vectorized-vs-incremental consistency checks. Reproducible benchmark scripts in `benchmarks/`
+- **354 tests** across 19 modules in ~4s, includes cross-engine consistency checks (event-driven vs vectorized produce equivalent results), tick-vs-bar convergence tests, walk-forward contamination regression tests (proves OOS data never leaks into training), and indicator edge-case / vectorized-vs-incremental consistency checks. Reproducible benchmark scripts in `benchmarks/`
 
 ## Architecture
 
@@ -48,6 +50,11 @@ Built with Python. Data sourced from [lucas-guerin-44/datalake-api](https://gith
 │    vectorized.py         ← numpy engine             │
 │    _core.pyx             ← Cython C extension (opt) │
 │    _tick_core.pyx        ← Cython tick extension    │
+│    latency_broker.py     ← latency-aware execution  │
+│    latency_models.py     ← FixedLatency, Gaussian…  │
+│    latency_metrics.py    ← fill latency measurement │
+│    order_book.py         ← FIFO matching engine     │
+│    order.py              ← Order, OrderType, Pending│
 │    tick.py               ← Tick type + aggregator   │
 │    broker.py             ← trade execution          │
 │    portfolio.py          ← equity, drawdown, margin │
@@ -247,7 +254,7 @@ See [docs/research.md](docs/research.md) for a write-up of the research process:
 
 ## Known Limitations
 
-- **Flat slippage model.** Fixed basis-point cost regardless of order size or liquidity. Tick data includes bid/ask spread which could be used for more realistic spread modeling.
+- **Flat slippage model (bar-level broker only).** The bar-level `Broker` applies a fixed basis-point cost regardless of order size or liquidity. The tick-level `LatencyAwareBroker` already uses real bid/ask spread when present in tick data — no slippage bps needed for spread cost. Neither model accounts for market impact (large orders moving the price).
 - **No funding costs.** No overnight financing simulation for leveraged or multi-day positions.
 - **No calendar awareness.** All bars are treated as equal, no weekends, holidays, or trading sessions.
 - **Tick backtester is single-asset only.** No portfolio-level tick backtesting yet (bar-level portfolio backtester handles multi-asset).
