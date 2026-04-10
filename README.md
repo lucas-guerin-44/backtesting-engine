@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/lucas-guerin-44/backtesting-engine/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-guerin-44/backtesting-engine/actions/workflows/test.yml)
 
-A multi-asset, event-driven backtesting engine for evaluating trading strategies on historical OHLC data. Supports portfolio-level backtesting with cross-asset allocation, Bayesian optimization, and walk-forward validation.
+A multi-asset, event-driven backtesting engine for evaluating trading strategies on historical OHLC and tick data. Supports portfolio-level backtesting with cross-asset allocation, Bayesian optimization, walk-forward validation, and tick-level execution simulation.
 
 Built with Python. Data sourced from [lucas-guerin-44/datalake-api](https://github.com/lucas-guerin-44/datalake-api).
 
@@ -11,12 +11,13 @@ Built with Python. Data sourced from [lucas-guerin-44/datalake-api](https://gith
 
 ## Features
 
-- **Three execution tiers**: event-driven (~300k bars/sec), vectorized (~700k bars/sec), and Cython-accelerated (~27M bars/sec). Optional C extension accelerates indicator computation (EMA, ATR, RSI) and trade chaining, 1,000 optimizer trials in ~8s vs ~29s pure Python
+- **Four execution tiers**: event-driven (~300k bars/sec), vectorized (~700k bars/sec), Cython-accelerated (~27M bars/sec), and tick-level (~2.4M ticks/sec). Optional C extensions accelerate indicator computation (EMA, ATR, RSI), trade chaining, and tick stop/TP scanning. 1,000 optimizer trials in ~8s vs ~29s pure Python
+- **Tick-level backtesting**: processes raw tick data, aggregates into OHLC bars at configurable timeframes, fills at next-tick price (not next-bar open), checks stops/TPs on every tick. Strategies receive dual callbacks: `on_tick()` for intra-bar logic and `on_bar()` on bar completion. Existing bar-only strategies work unchanged (default no-op `on_tick()`)
 - **Gap-aware stops**: if price gaps past a stop level, fills at the open (worse price), not the stop
 - **Multi-asset portfolios**: shared cash, cross-asset risk limits, 4 allocation schemes (equal weight, risk parity, correlation-aware, regime-aware)
 - **Bayesian optimization**: Optuna TPE with walk-forward validation and parameter constraints
 - **Statistical testing**: bootstrap CI, permutation test, Deflated Sharpe Ratio (Bailey & Lopez de Prado 2014)
-- **230 tests** across 14 modules in ~3s, includes cross-engine consistency checks (event-driven vs vectorized produce equivalent results), walk-forward contamination regression tests (proves OOS data never leaks into training), and indicator edge-case / vectorized-vs-incremental consistency checks. Reproducible benchmark script in `benchmarks/`
+- **254 tests** across 15 modules in ~4s, includes cross-engine consistency checks (event-driven vs vectorized produce equivalent results), tick-vs-bar convergence tests, walk-forward contamination regression tests (proves OOS data never leaks into training), and indicator edge-case / vectorized-vs-incremental consistency checks. Reproducible benchmark scripts in `benchmarks/`
 
 ## Architecture
 
@@ -41,25 +42,28 @@ Built with Python. Data sourced from [lucas-guerin-44/datalake-api](https://gith
 ├─────────────────────────────────────────────────────┤
 │  backtesting/                                       │
 │    backtest.py           ← event-driven engine      │
+│    tick_backtest.py      ← tick-level engine        │
 │    portfolio_backtest.py ← multi-asset engine       │
 │    allocation.py         ← 4 allocation schemes     │
 │    vectorized.py         ← numpy engine             │
 │    _core.pyx             ← Cython C extension (opt) │
+│    _tick_core.pyx        ← Cython tick extension    │
+│    tick.py               ← Tick type + aggregator   │
 │    broker.py             ← trade execution          │
 │    portfolio.py          ← equity, drawdown, margin │
 │    indicators.py         ← O(1) incremental + vec   │
 │    statistics.py         ← Sharpe, bootstrap, DSR   │
-│    data.py               ← OHLC validation          │
+│    data.py               ← OHLC + tick validation   │
 │    plot.py               ← equity + drawdown charts │
 │    strategy.py           ← abstract base class      │
 │    types.py              ← Bar, Trade, BacktestConfig│
 ├─────────────────────────────────────────────────────┤
-│  utils.py  (data fetching, frequency inference)     │
+│  utils.py  (data fetching, tick loading, freq inf.) │
 │  config.py (env-based configuration)                │
 └─────────────────────────────────────────────────────┘
 ```
 
-Strategies extend `Strategy` and implement `on_bar(i, bar, equity) -> Optional[Trade]`. The `Backtester` delegates execution to the `Broker` (gap-aware stops, slippage, commission) and tracking to the `Portfolio` (equity, drawdown, margin calls). The `PortfolioBacktester` extends this to multiple assets with shared cash, allocation weights, and cross-asset risk management, exits for all assets are processed before any new entries, preventing cash race conditions.
+Strategies extend `Strategy` and implement `on_bar(i, bar, equity) -> Optional[Trade]`. Optionally override `on_tick()` for intra-bar logic (tick-level strategies) — the default is a no-op so existing strategies work unchanged. The `Backtester` delegates execution to the `Broker` (gap-aware stops, slippage, commission) and tracking to the `Portfolio` (equity, drawdown, margin calls). The `TickBacktester` processes raw ticks, aggregates into bars via `TickAggregator`, and fills at tick-level granularity. The `PortfolioBacktester` extends this to multiple assets with shared cash, allocation weights, and cross-asset risk management, exits for all assets are processed before any new entries, preventing cash race conditions.
 
 ## Quick Start
 
@@ -67,7 +71,7 @@ Strategies extend `Strategy` and implement `on_bar(i, bar, equity) -> Optional[T
 python -m venv venv && source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env  # Set DATALAKE_URL
-pip install cython && python setup.py build_ext --inplace  # Optional: ~3.5x optimizer speedup
+pip install cython && python setup.py build_ext --inplace  # Optional: Cython extensions for bar + tick engines
 ```
 
 ```bash
@@ -106,6 +110,25 @@ config = BacktestConfig(starting_cash=10_000, commission_bps=5.0, slippage_bps=2
 bt = Backtester(df, MomentumStrategy(trend_filter_period=200), config=config, symbol="XAUUSD")
 equity_curve, trades = bt.run()
 ```
+
+### Tick-level backtest
+
+```python
+from utils import load_ticks
+from backtesting.tick_backtest import TickBacktester
+from backtesting.types import BacktestConfig
+from strategies import TrendFollowingStrategy
+
+ticks = load_ticks("tick_data/XAUUSD_TICK.csv")  # MT5 or generic CSV
+config = BacktestConfig(starting_cash=10_000, commission_bps=5.0, slippage_bps=2.0)
+bt = TickBacktester(ticks, TrendFollowingStrategy(), timeframe="M5", config=config, symbol="XAUUSD")
+equity_curve, trades = bt.run()
+
+# bt.bars contains the aggregated M5 bars
+# bt.bar_equity_curve has one equity value per completed bar
+```
+
+Tick data is aggregated into bars at the specified timeframe. Strategies receive `on_bar()` when a bar completes and optionally `on_tick()` on every tick for intra-bar logic (limit orders, tighter stop management, microstructure signals). Fills happen at the next tick's price, stops/TPs are checked on every tick at the exact breach price.
 
 ### Multi-asset portfolio
 
@@ -162,6 +185,22 @@ class MyStrategy(Strategy):
                      take_profit=bar.close * 1.04)
 ```
 
+For tick-level strategies, override `on_tick()` and/or `manage_position_tick()`:
+
+```python
+class MyTickStrategy(Strategy):
+    def on_bar(self, i, bar, equity):
+        ...  # Bar-level signal generation (indicators, entries)
+
+    def on_tick(self, tick, current_bar, equity):
+        ...  # Intra-bar logic (limit orders, microstructure signals)
+
+    def manage_position_tick(self, tick, trade):
+        ...  # Tick-granularity stop management (tighter trailing stops)
+```
+
+Both `on_tick()` and `manage_position_tick()` default to no-ops, so existing strategies work unchanged with `TickBacktester`.
+
 Register in `strategy_registry.py` to expose via the API and dashboard.
 
 ## Multi-Asset Portfolio
@@ -180,7 +219,9 @@ Four allocation schemes, all with optional `max_weight` capping:
 
 ## Execution Model
 
-Each bar is processed: stop exits → TP exits → strategy signal → entry execution → portfolio update. Gap-aware: if a bar opens past a stop, the fill is at the open price (worse), not the stop level. When both stop and TP are hit in the same bar, stops fire first (conservative default).
+**Bar-level:** Each bar is processed: stop exits → TP exits → strategy signal → entry execution → portfolio update. Gap-aware: if a bar opens past a stop, the fill is at the open price (worse), not the stop level. When both stop and TP are hit in the same bar, stops fire first (conservative default).
+
+**Tick-level:** Each tick is processed: stop/TP check at exact tick price → fill pending trades at tick price → aggregate into bar → call `on_bar()` when bar completes → call `on_tick()` for intra-bar signals. No gap logic needed — ticks are the atomic price updates. Fills happen at the next tick after a signal, not the next bar open.
 
 ## API
 
@@ -206,6 +247,7 @@ See [docs/research.md](docs/research.md) for a write-up of the research process:
 
 ## Known Limitations
 
-- **Flat slippage model.** Fixed basis-point cost regardless of order size or liquidity.
+- **Flat slippage model.** Fixed basis-point cost regardless of order size or liquidity. Tick data includes bid/ask spread which could be used for more realistic spread modeling.
 - **No funding costs.** No overnight financing simulation for leveraged or multi-day positions.
 - **No calendar awareness.** All bars are treated as equal, no weekends, holidays, or trading sessions.
+- **Tick backtester is single-asset only.** No portfolio-level tick backtesting yet (bar-level portfolio backtester handles multi-asset).
