@@ -24,6 +24,7 @@ import pandas as pd
 
 from backtesting.allocation import Allocator, AllocationWeights, EqualWeightAllocator
 from backtesting.data import validate_ohlc
+from backtesting.order import Order, OrderType
 from backtesting.portfolio import Portfolio
 from backtesting.types import BacktestConfig, Bar, Trade
 from utils import infer_freq_per_year
@@ -264,6 +265,8 @@ class PortfolioBacktester:
         closed_count = 0  # Track broker.closed_trades length to detect new closures
         # Pending trades: signal on bar i, execute on bar i+1 at open
         pending_trades: Dict[str, Trade] = {}
+        # Pending limit/stop orders: persist until price crosses level or replaced
+        pending_orders: Dict[str, Order] = {}
 
         # Local refs for speed
         manage_fns = {sym: self.strategies[sym].manage_position for sym in symbols}
@@ -375,6 +378,80 @@ class PortfolioBacktester:
                         price=pt.entry_price, reason="buying_power",
                     ))
 
+            # PHASE 2b: Execute resting LIMIT and STOP orders
+            for sym in list(pending_orders.keys()):
+                if not is_real[sym][i]:
+                    continue
+                po = pending_orders[sym]
+                bar = Bar(ts[i], o[sym][i], h[sym][i], lo[sym][i], c[sym][i])
+                fill_px = None
+
+                if po.type == OrderType.LIMIT:
+                    if po.side > 0 and bar.low <= po.limit_price:
+                        # Price came down to our bid; gap improvement if open < limit
+                        fill_px = min(bar.open, po.limit_price)
+                    elif po.side < 0 and bar.high >= po.limit_price:
+                        # Price came up to our ask; gap improvement if open > limit
+                        fill_px = max(bar.open, po.limit_price)
+
+                elif po.type == OrderType.STOP:
+                    if po.side > 0 and bar.high >= po.stop_trigger:
+                        fill_px = max(bar.open, po.stop_trigger)
+                    elif po.side < 0 and bar.low <= po.stop_trigger:
+                        fill_px = min(bar.open, po.stop_trigger)
+
+                if fill_px is None:
+                    continue  # Order stays resting
+
+                pending_orders.pop(sym)
+
+                if risk_limits is not None:
+                    _cash = portfolio.cash
+                    _pnl = sum(
+                        (c[s2][i] - tr.entry_price) * tr.side * tr.size
+                        for s2 in symbols for tr in positions.get(s2, [])
+                    )
+                    _eq = _cash + _pnl
+                    # Use fill_px * qty as the notional for the risk check
+                    proxy_trade = Trade(
+                        entry_bar=bar, side=po.side, size=po.qty,
+                        entry_price=fill_px,
+                        stop_price=po.protective_stop or fill_px * 0.95,
+                        take_profit=po.take_profit,
+                    )
+                    reason = self._check_risk_limits(
+                        risk_limits, sym, proxy_trade, positions, c, i, symbols, _eq,
+                    )
+                    if reason is not None:
+                        audit_log.append(AuditEvent(
+                            bar_idx=i, timestamp=ts[i], symbol=sym,
+                            event="skip", side=po.side, size=po.qty,
+                            price=fill_px, reason=reason,
+                        ))
+                        continue
+
+                sym_costs = self._costs[sym]
+                portfolio.commission_bps = sym_costs["commission_bps"]
+                portfolio.slippage_bps = sym_costs["slippage_bps"]
+
+                all_prices = {s: c[s][i] for s in symbols}
+                pos_before = len(positions.get(sym, []))
+                broker.open_trade(
+                    symbol=sym, bar=bar,
+                    side=po.side, size=po.qty,
+                    stop=po.protective_stop, take_profit=po.take_profit,
+                    entry_price=fill_px,
+                    current_prices=all_prices,
+                )
+                pos_after = len(positions.get(sym, []))
+                event = "fill" if pos_after > pos_before else "skip"
+                reason = "" if pos_after > pos_before else "buying_power"
+                audit_log.append(AuditEvent(
+                    bar_idx=i, timestamp=ts[i], symbol=sym,
+                    event=event, side=po.side, size=po.qty,
+                    price=fill_px, reason=reason,
+                ))
+
             # Sync cash after all exits and entries
             cash = portfolio.cash
 
@@ -413,14 +490,40 @@ class PortfolioBacktester:
                 li = local_idx[sym][i]
                 new_trade = strats[sym](li, bar, asset_equity)
 
-                if new_trade is not None and new_trade.size > 0:
-                    pending_trades[sym] = new_trade
-                    audit_log.append(AuditEvent(
-                        bar_idx=i, timestamp=ts[i], symbol=sym,
-                        event="signal", side=new_trade.side,
-                        size=new_trade.size, price=new_trade.entry_price,
-                        equity=asset_equity,
-                    ))
+                if new_trade is not None:
+                    if isinstance(new_trade, Order):
+                        size = new_trade.qty
+                        side = new_trade.side
+                        sig_price = (
+                            new_trade.limit_price if new_trade.type == OrderType.LIMIT
+                            else new_trade.stop_trigger if new_trade.type == OrderType.STOP
+                            else bar.close
+                        )
+                        if size > 0:
+                            if new_trade.type == OrderType.MARKET:
+                                # MARKET order via Order API: fill at next bar open
+                                pending_trades[sym] = Trade(
+                                    entry_bar=bar, side=side, size=size,
+                                    entry_price=bar.close,
+                                    stop_price=new_trade.protective_stop or 0.0,
+                                    take_profit=new_trade.take_profit,
+                                )
+                            else:
+                                # LIMIT or STOP: rest until price crosses
+                                pending_orders[sym] = new_trade
+                            audit_log.append(AuditEvent(
+                                bar_idx=i, timestamp=ts[i], symbol=sym,
+                                event="signal", side=side, size=size,
+                                price=sig_price, equity=asset_equity,
+                            ))
+                    elif new_trade.size > 0:
+                        pending_trades[sym] = new_trade
+                        audit_log.append(AuditEvent(
+                            bar_idx=i, timestamp=ts[i], symbol=sym,
+                            event="signal", side=new_trade.side,
+                            size=new_trade.size, price=new_trade.entry_price,
+                            equity=asset_equity,
+                        ))
 
             equity = portfolio_equity
             equity_curve[i] = max(equity, 0.0)

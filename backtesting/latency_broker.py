@@ -95,6 +95,10 @@ class LatencyAwareBroker:
         self._fill_records: List = []
         # Submission-time price index: order_id -> market_price at submit
         self._submit_prices: Dict[str, float] = {}
+        # Submission tick timestamp: order_id -> nanoseconds at queue entry
+        # Used for latency measurement (filled_at - submit_ns), not order.submitted_at
+        # which is the bar timestamp set by the strategy and includes bar duration.
+        self._submit_ns: Dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Pass-throughs so TickBacktester treats this as a drop-in for Broker
@@ -149,6 +153,7 @@ class LatencyAwareBroker:
             delay_ns = self.ack_latency_ns + self.fill_latency_ns
         fill_after_ns = ts.value + delay_ns
         self._pending.append(PendingOrder(order=order, fill_after_ns=fill_after_ns))
+        self._submit_ns[order.order_id] = ts.value
         if market_price > 0:
             self._submit_prices[order.order_id] = market_price
 
@@ -301,7 +306,11 @@ class LatencyAwareBroker:
         """Append a FillRecord for latency metrics collection."""
         # Lazy import to avoid circular import at module level.
         from backtesting.latency_metrics import FillRecord
-        latency_us = (filled_at.value - submitted_at.value) / 1_000.0
+        # Use the tick timestamp when the order entered the queue, not
+        # order.submitted_at (which is bar.ts set by the strategy and
+        # includes the full bar duration before the signal fired).
+        submit_ns = self._submit_ns.get(order.order_id, submitted_at.value)
+        latency_us = (filled_at.value - submit_ns) / 1_000.0
         price_at_submit = self._submit_prices.get(order.order_id, 0.0)
         self._fill_records.append(
             FillRecord(

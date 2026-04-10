@@ -27,6 +27,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backtesting import LatencyAwareBroker, Portfolio, TickBacktester
+from backtesting.latency_metrics import compare_latency_impact
 from backtesting.order import Order, OrderType
 from backtesting.strategy import Strategy
 from backtesting.tick import Tick
@@ -297,6 +298,8 @@ def main():
     parser = argparse.ArgumentParser(description="Tick backtest latency demo")
     parser.add_argument("--instrument", default="XAUUSD", help="Instrument to fetch (default: XAUUSD)")
     parser.add_argument("--n", type=int, default=3_000, help="Number of ticks (default: 3000)")
+    parser.add_argument("--latency-ms", type=float, default=50.0, dest="latency_ms",
+                        help="Ack latency in milliseconds for the latency runs (default: 50)")
     parser.add_argument("--synthetic", action="store_true", help="Force synthetic data")
     args = parser.parse_args()
 
@@ -317,14 +320,16 @@ def main():
         print(f"  {len(ticks)} ticks | "
               f"{ticks[0].ts.strftime('%H:%M:%S')} to {ticks[-1].ts.strftime('%H:%M:%S')}\n")
 
+    ack_ms = args.latency_ms
+
     print("Running instant-fill backtest (legacy Trade path)...")
     r_instant = run_instant(ticks)
 
-    print("Running latency-aware backtest (50ms ack delay, MARKET orders)...")
-    r_latency = run_latency(ticks, ack_ms=50.0)
+    print(f"Running latency-aware backtest ({ack_ms:.0f}ms ack delay, MARKET orders)...")
+    r_latency = run_latency(ticks, ack_ms=ack_ms)
 
-    print("Running limit-order backtest (50ms delay, LIMIT 3 pips inside close)...")
-    r_limit = run_limit(ticks, ack_ms=50.0, offset=0.03)
+    print(f"Running limit-order backtest ({ack_ms:.0f}ms delay, LIMIT 3 pips inside close)...")
+    r_limit = run_limit(ticks, ack_ms=ack_ms, offset=0.03)
 
     n_open_i   = len(r_instant["open_pos"])
     n_open_l   = len(r_latency["open_pos"])
@@ -358,6 +363,23 @@ def main():
     impact = total_l - total_i
     sign = "+" if impact >= 0 else ""
     print(f"\nLatency drag vs instant fill: {sign}{impact:.2f} ({sign}{(impact/10_000)*100:.3f}%)")
+
+    # ------------------------------------------------------------------
+    # Latency impact metrics
+    # ------------------------------------------------------------------
+    print(f"\nRunning latency impact analysis (zero-latency vs {ack_ms:.0f}ms)...")
+    result = compare_latency_impact(
+        ticks=ticks,
+        strategy_factory=lambda: LatencyMarketStrategy(symbol="default"),
+        ack_latency_ns=int(ack_ms * 1_000_000),
+        starting_cash=10_000,
+        commission_bps=1.0,
+        slippage_bps=2.0,
+        max_leverage=5.0,
+        symbol="default",
+        timeframe="M1",
+    )
+    result.print_summary()
 
 
 if __name__ == "__main__":
