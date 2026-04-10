@@ -223,3 +223,71 @@ def validate_ohlc(
             report.n_warnings += 1
 
     return report
+
+
+def validate_ticks(
+    ticks,
+) -> ValidationReport:
+    """Validate a list of Tick objects for common data quality issues.
+
+    Parameters
+    ----------
+    ticks : list of Tick
+        Raw tick data to validate.
+
+    Returns
+    -------
+    ValidationReport
+    """
+    report = ValidationReport()
+    report.n_bars = len(ticks)  # Reuse n_bars field for tick count
+
+    if len(ticks) == 0:
+        report.issues.append(ValidationIssue(
+            Severity.ERROR, "data", "Tick list is empty"))
+        report.n_errors += 1
+        return report
+
+    # 1. NaN / inf prices
+    bad_prices = [i for i, t in enumerate(ticks)
+                  if t.price != t.price or np.isinf(t.price)]  # NaN != NaN
+    if bad_prices:
+        report.issues.append(ValidationIssue(
+            Severity.ERROR, "price", f"NaN/inf prices at {len(bad_prices)} ticks",
+            row_indices=bad_prices[:20]))
+        report.n_errors += 1
+
+    # 2. Non-positive prices
+    nonpos = [i for i, t in enumerate(ticks) if t.price <= 0]
+    if nonpos:
+        report.issues.append(ValidationIssue(
+            Severity.WARNING, "price", f"{len(nonpos)} ticks with zero or negative price",
+            row_indices=nonpos[:20]))
+        report.n_warnings += 1
+
+    # 3. Monotonic timestamps
+    if len(ticks) > 1:
+        non_mono = []
+        for i in range(1, len(ticks)):
+            if ticks[i].ts < ticks[i - 1].ts:
+                non_mono.append(i)
+                if len(non_mono) >= 20:
+                    break
+        if non_mono:
+            report.issues.append(ValidationIssue(
+                Severity.ERROR, "timestamp",
+                f"Non-monotonic timestamps at {len(non_mono)}+ points",
+                row_indices=non_mono))
+            report.n_errors += 1
+
+    # 4. Duplicate timestamps (warning, not error — multiple ticks at same
+    # millisecond is normal for high-frequency data)
+    if len(ticks) > 1:
+        dup_count = sum(1 for i in range(1, len(ticks)) if ticks[i].ts == ticks[i - 1].ts)
+        if dup_count > 0:
+            report.issues.append(ValidationIssue(
+                Severity.WARNING, "timestamp",
+                f"{dup_count} consecutive duplicate timestamps"))
+            report.n_warnings += 1
+
+    return report

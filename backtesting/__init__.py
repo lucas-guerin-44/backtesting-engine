@@ -15,6 +15,8 @@ from backtesting.portfolio_backtest import (
     AuditEvent, PortfolioBacktester, PortfolioBacktestResult, RiskLimits,
 )
 from backtesting.strategy import Strategy
+from backtesting.tick import Tick, TickAggregator
+from backtesting.tick_backtest import TickBacktester
 from backtesting.types import Bar, Trade
 
 __all__ = [
@@ -33,5 +35,8 @@ __all__ = [
     "RiskLimits",
     "RiskParityAllocator",
     "Strategy",
+    "Tick",
+    "TickAggregator",
+    "TickBacktester",
     "Trade",
 ]

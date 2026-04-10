@@ -15,8 +15,12 @@ try:
     import numpy as np
 
     extensions = cythonize(
-        [Extension("backtesting._core", ["backtesting/_core.pyx"],
-                   include_dirs=[np.get_include()])],
+        [
+            Extension("backtesting._core", ["backtesting/_core.pyx"],
+                       include_dirs=[np.get_include()]),
+            Extension("backtesting._tick_core", ["backtesting/_tick_core.pyx"],
+                       include_dirs=[np.get_include()]),
+        ],
         compiler_directives={
             "boundscheck": False,
             "wraparound": False,

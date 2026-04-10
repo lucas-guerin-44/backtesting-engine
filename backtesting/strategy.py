@@ -18,6 +18,12 @@ class Strategy(ABC):
     the Backtester queues the signal and fills it at the following bar's
     open price.
 
+    For tick-level backtesting, strategies can also override ``on_tick()``
+    to react to individual price updates within a bar. The default
+    implementation delegates to ``on_bar()`` only when a bar completes —
+    override it for intra-bar logic (limit orders, micro-structure signals,
+    tighter stop management, etc.).
+
     Example
     -------
     >>> class MyStrategy(Strategy):
@@ -54,6 +60,29 @@ class Strategy(ABC):
         """
         ...
 
+    def on_tick(self, tick, current_bar: Optional[Bar], equity: float) -> Optional[Trade]:
+        """Called on every tick during tick-level backtesting.
+
+        Override this for intra-bar logic. The default does nothing — signal
+        generation happens in ``on_bar()`` when a bar completes.
+
+        Parameters
+        ----------
+        tick : Tick
+            The raw tick (timestamp, price, volume, optional bid/ask).
+        current_bar : Bar or None
+            The in-progress partial bar (OHLC updated with each tick but
+            not yet closed). None before the first tick.
+        equity : float
+            Current portfolio equity.
+
+        Returns
+        -------
+        Trade or None
+            A Trade to open (filled at tick price with slippage), or None.
+        """
+        return None
+
     def manage_position(self, bar: Bar, trade: Trade) -> None:
         """Called each bar for every open position. Override to implement
         trailing stops or other position management.
@@ -67,4 +96,18 @@ class Strategy(ABC):
             Current OHLC bar.
         trade : Trade
             The open trade to manage (stop_price can be mutated directly).
+        """
+
+    def manage_position_tick(self, tick, trade: Trade) -> None:
+        """Called on every tick for open positions during tick-level backtesting.
+
+        Override for tick-granularity stop management (e.g., tighter trailing
+        stops that react to every price update). The default does nothing.
+
+        Parameters
+        ----------
+        tick : Tick
+            The raw tick.
+        trade : Trade
+            The open trade to manage.
         """

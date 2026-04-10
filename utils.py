@@ -2,13 +2,16 @@
 
 import math
 import os
+from typing import List
 
+import numpy as np
 import pandas as pd
 import requests
 
 from config import DATALAKE_URL
 
 LOCAL_DATA_DIR = "./ohlc_data"
+LOCAL_TICK_DIR = "./tick_data"
 
 
 def fetch_ohlc(instrument: str, timeframe: str, start_date: str, end_date: str, limit: int = 0) -> pd.DataFrame:
@@ -103,6 +106,123 @@ def fetch_ohlc(instrument: str, timeframe: str, start_date: str, end_date: str, 
 
     df_combined.to_csv(filepath, index=False)
     return df_combined
+
+
+def load_ticks(
+    path: str,
+    start: str = None,
+    end: str = None,
+    max_ticks: int = 0,
+) -> List["Tick"]:
+    """Load tick data from a CSV file.
+
+    Supports MetaTrader 5 tick export format (tab-separated with angle-bracket
+    headers) and generic CSV (timestamp, bid, ask or timestamp, price).
+
+    Parameters
+    ----------
+    path : str
+        Path to the CSV file.
+    start : str, optional
+        Start date filter (inclusive), e.g. ``"2025-01-01"``.
+    end : str, optional
+        End date filter (inclusive), e.g. ``"2025-12-31"``.
+    max_ticks : int
+        Maximum ticks to load (0 = all). Useful for quick tests.
+
+    Returns
+    -------
+    list of Tick
+    """
+    from backtesting.tick import Tick
+
+    # Sniff the format from the first line
+    with open(path, "r", encoding="utf-8-sig") as f:
+        header_line = f.readline().strip()
+
+    is_mt5 = "<DATE>" in header_line.upper() or "<BID>" in header_line.upper()
+
+    if is_mt5:
+        # MT5 tab-separated: <DATE> <TIME> <BID> <ASK> <LAST> <VOLUME> <FLAGS>
+        df = pd.read_csv(
+            path,
+            sep="\t",
+            dtype={"<LAST>": str, "<VOLUME>": str, "<FLAGS>": str},
+            low_memory=False,
+            nrows=max_ticks if max_ticks > 0 else None,
+        )
+        # Normalize column names
+        df.columns = [c.strip("<>").lower() for c in df.columns]
+
+        # Build timestamp from date + time
+        df["timestamp"] = pd.to_datetime(df["date"] + " " + df["time"], format="mixed")
+
+        # Mid price from bid/ask.
+        # MT5 flag=4 means only ask updated (bid is NaN), flag=2 means only
+        # bid updated. Forward-fill to carry the last known value.
+        bid = pd.to_numeric(df["bid"], errors="coerce").ffill()
+        ask = pd.to_numeric(df["ask"], errors="coerce").ffill()
+        df["price"] = (bid + ask) / 2
+        df["bid_clean"] = bid
+        df["ask_clean"] = ask
+
+        # Volume (often empty for CFDs)
+        if "volume" in df.columns:
+            df["vol"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
+        else:
+            df["vol"] = 0.0
+    else:
+        # Generic CSV: timestamp, price, volume OR timestamp, bid, ask, volume
+        df = pd.read_csv(
+            path,
+            nrows=max_ticks if max_ticks > 0 else None,
+        )
+        df.columns = [c.strip().lower() for c in df.columns]
+        df["timestamp"] = pd.to_datetime(df["timestamp"], format="mixed")
+
+        if "bid" in df.columns and "ask" in df.columns:
+            bid = pd.to_numeric(df["bid"], errors="coerce")
+            ask = pd.to_numeric(df["ask"], errors="coerce")
+            df["price"] = (bid + ask) / 2
+            df["bid_clean"] = bid
+            df["ask_clean"] = ask
+        elif "price" in df.columns:
+            df["price"] = pd.to_numeric(df["price"], errors="coerce")
+            df["bid_clean"] = np.nan
+            df["ask_clean"] = np.nan
+        else:
+            raise ValueError(f"Cannot find price columns in {path}. "
+                             f"Expected 'price' or 'bid'+'ask'. Got: {list(df.columns)}")
+
+        df["vol"] = pd.to_numeric(df.get("volume", 0), errors="coerce").fillna(0.0)
+
+    # Date range filter
+    if start is not None:
+        df = df[df["timestamp"] >= pd.Timestamp(start)]
+    if end is not None:
+        df = df[df["timestamp"] <= pd.Timestamp(end)]
+
+    # Drop NaN prices
+    df = df.dropna(subset=["price"])
+
+    # Build Tick objects
+    timestamps = df["timestamp"].values.astype("datetime64[ns]")
+    prices = df["price"].values.astype(np.float64)
+    volumes = df["vol"].values.astype(np.float64)
+    bids = df["bid_clean"].values if "bid_clean" in df.columns else None
+    asks = df["ask_clean"].values if "ask_clean" in df.columns else None
+
+    ticks = []
+    for i in range(len(prices)):
+        ticks.append(Tick(
+            ts=pd.Timestamp(timestamps[i]),
+            price=prices[i],
+            volume=volumes[i],
+            bid=float(bids[i]) if bids is not None and not np.isnan(bids[i]) else None,
+            ask=float(asks[i]) if asks is not None and not np.isnan(asks[i]) else None,
+        ))
+
+    return ticks
 
 
 def infer_freq_per_year(timestamps) -> int:
