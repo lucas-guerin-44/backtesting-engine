@@ -328,29 +328,138 @@ behavior exactly.
 
 ### What the latency layer still doesn't model
 
-- **Queue position.** If 1000 limit buy orders are resting at price 100, your
-  order is at the back of the queue. You won't fill until all 1000 ahead of you
-  have been matched. The latency layer has no concept of queue depth or FIFO
-  position. This is what the order book (Phase 2) addresses.
-
-- **Partial fills.** A limit buy for 100 units at price 100 will fill fully if
-  100+ units are available. If only 40 units trade at that price, you get a
-  partial fill and the rest remains in the queue. The latency layer is all-or-
-  nothing: the full size fills the moment the price condition is met.
-
 - **Market impact.** Large orders move the price. A market order for 10,000
   units doesn't fill entirely at the best ask, it sweeps through multiple price
   levels, with each additional unit getting a worse price. The latency layer
-  treats every order as price-taking.
-
-- **Latency jitter.** Real network latency is not a fixed value, it's a
-  distribution with variance, tail events, and occasional spikes. The latency
-  layer uses a constant `ack_latency_ns`. A more realistic model would sample
-  from a distribution on each submission.
+  treats every order as price-taking regardless of size.
 
 ---
 
-## 8. Design Decisions in Retrospect
+## 8. The Order Book: Queue Position and Partial Fills
+
+The simple latency broker fills a limit order the moment the market-side price
+crosses the limit level, for the full requested quantity. This misses two things
+that matter at tick frequency: **your position in the queue relative to other
+resting orders**, and **limited liquidity at a single price level**.
+
+### FIFO queue priority
+
+`PriceLevel` is a FIFO deque of `(order_id, qty_remaining)` pairs at a single
+price. When the matching engine sees that the best ask has crossed a resting bid
+level, it drains the level front-to-back:
+
+```python
+# order_book.py
+def consume(self, available_qty: float) -> List[Tuple[str, float]]:
+    while self._orders and remaining > 0:
+        order_id, qty = self._orders[0]
+        fill_qty = min(qty, remaining)
+        ...
+        if fill_qty >= qty:
+            self._orders.popleft()     # fully consumed
+        else:
+            self._orders[0] = (order_id, qty - fill_qty)  # partial, stays front
+            break
+```
+
+The first order submitted gets the first fill. A later order at the same price
+waits until all earlier orders are fully filled. This is how real exchange
+matching engines work.
+
+### Partial fills via max_qty_per_level
+
+`MatchingEngine` accepts `max_qty_per_level: float`. On each tick, at most
+this many units fill per price level. Set it to `float('inf')` (the default)
+for a perfectly deep market. Set it to a small value to model thin books where
+large orders fill across multiple ticks.
+
+There is no Level 2 data in the tick feed, so `max_qty_per_level` is a
+configurable assumption, not derived from observed depth. This is the same
+honesty problem as `slippage_bps`, it is a made-up number that should be
+calibrated to the instrument and time period. The default is `inf` because a
+false precision assumption is worse than an explicit infinite-depth one.
+
+### Resting orders after partial fills
+
+When `MatchingEngine.submit()` returns a partial fill, the unfilled remainder
+is automatically placed in the book at the same limit price. It will drain on
+future ticks as more liquidity arrives at that level:
+
+```python
+# order_book.py
+fill_qty = min(order.qty, self.max_qty_per_level)
+remainder = order.qty - fill_qty
+if remainder > 1e-9:
+    self.book.add_resting_bid(order.order_id, order.limit_price, remainder)
+return [Fill(order_id=order.order_id, price=ask, qty=fill_qty, ts=ts)]
+```
+
+`LatencyAwareBroker` tracks these in `_resting: Dict[str, Tuple[Order, float]]`
+and calls `broker.open_trade()` on each partial fill as it arrives.
+
+---
+
+## 9. Latency Models: From Fixed to Stochastic
+
+The original latency layer used a single constant: `ack_latency_ns`. Every order
+waited exactly that many nanoseconds before becoming eligible to fill. This is
+deterministic and easy to reason about, but it doesn't reflect how network
+latency actually behaves.
+
+Real round-trip latency is a distribution. Most fills happen near the mean; a
+small fraction take much longer (garbage collection pause, network congestion,
+exchange queue backlog). A constant model can't capture the tail, and the tail
+is where strategies that depend on tight timing get hurt.
+
+The `LatencyModel` ABC provides a `sample_ns() -> int` interface. Passing a
+model to `LatencyAwareBroker` replaces the fixed delay with a per-order sample:
+
+```python
+if self._latency_model is not None:
+    delay_ns = self._latency_model.sample_ns()
+else:
+    delay_ns = self.ack_latency_ns + self.fill_latency_ns
+```
+
+### Available models
+
+**`FixedLatency(total_us)`**, the original behavior, no randomness. Use this
+when you want deterministic, reproducible results and aren't studying latency
+sensitivity.
+
+**`GaussianLatency(mean_us, std_us)`**, symmetric jitter around a mean. Values
+below zero are floored at zero. Reasonable first upgrade: easy to reason about,
+and `std_us` directly represents "how much does my latency vary?".
+
+**`LogNormalLatency(median_us, sigma)`**, right-skewed. Parameterised by the
+median (50th percentile) rather than the mean, because the mean of a log-normal
+is pulled upward by the tail. A higher `sigma` gives a heavier tail. Closer to
+empirical network latency distributions, where most samples cluster near the
+median but occasional spikes reach 5-10x the typical value.
+
+**`ComponentLatency(network_out, queue, processing, network_in)`**, sums four
+independently sampled legs. Useful for decomposing where latency budget is
+spent: co-located servers might have 50us each for network legs but 500us for
+exchange queue time. Each leg is itself a `LatencyModel`, so you can mix fixed
+and stochastic components.
+
+### Why the default stays None
+
+Stochastic latency means each backtest run produces a different equity curve.
+That is appropriate when studying latency sensitivity, but it breaks the basic
+assumption that a backtest is reproducible. The default `latency_model=None`
+falls back to `ack_latency_ns + fill_latency_ns`, which is constant and
+reproducible. Opt in to stochastic latency deliberately, with a fixed RNG seed
+if you want reproducibility:
+
+```python
+import numpy as np
+model = GaussianLatency(mean_us=500, std_us=100, rng=np.random.default_rng(42))
+```
+
+---
+
+## 10. Design Decisions in Retrospect
 
 **Event-driven vs vectorized:** The engine has both an event-driven loop
 (`Backtester`, `TickBacktester`) and a vectorized engine (`vectorized.py`). The

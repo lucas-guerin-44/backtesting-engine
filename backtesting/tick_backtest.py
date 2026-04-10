@@ -357,7 +357,8 @@ class TickBacktester:
                 new_trade = on_bar(bar_index, completed_bar, equity)
                 if new_trade is not None:
                     if latency_broker is not None and isinstance(new_trade, Order):
-                        latency_broker.submit(new_trade, timestamps[t_idx])
+                        market_px = prices[t_idx]
+                        latency_broker.submit(new_trade, timestamps[t_idx], market_price=market_px)
                     elif not isinstance(new_trade, Order) and new_trade.size > 0:
                         pending_bar_trade = new_trade
                 bar_index += 1
@@ -367,7 +368,8 @@ class TickBacktester:
                 tick_trade = on_tick(self.ticks[t_idx], agg.current_bar, equity)
                 if tick_trade is not None:
                     if latency_broker is not None and isinstance(tick_trade, Order):
-                        latency_broker.submit(tick_trade, timestamps[t_idx])
+                        market_px = prices[t_idx]
+                        latency_broker.submit(tick_trade, timestamps[t_idx], market_price=market_px)
                     elif not isinstance(tick_trade, Order) and tick_trade.size > 0:
                         pending_tick_trade = tick_trade
 
