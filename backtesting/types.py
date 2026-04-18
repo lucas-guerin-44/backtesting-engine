@@ -40,6 +40,7 @@ class Trade:
     entry_price: float
     stop_price: float
     take_profit: float
+    limit_price: Optional[float] = None  # Limit fill price (None = market at next open)
     bars_held: int = 0
     exit_price: Optional[float] = None
     pnl: Optional[float] = None

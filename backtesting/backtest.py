@@ -164,16 +164,38 @@ class Backtester:
                 open_pos = positions.get(symbol)
                 has_positions = open_pos is not None and len(open_pos) > 0
 
-            # Execute pending trade from previous bar at this bar's open
+            # Execute pending trade from previous bar
             if pending_trade is not None:
-                broker.open_trade(
-                    symbol=symbol, bar=bar,
-                    side=pending_trade.side, size=pending_trade.size,
-                    stop=pending_trade.stop_price,
-                    take_profit=pending_trade.take_profit,
-                    entry_price=None,  # Fills at bar.open (next-bar-open execution)
-                )
-                pending_trade = None
+                limit = getattr(pending_trade, 'limit_price', None)
+
+                if limit is not None:
+                    # Limit order: only fill if this bar's range includes the limit price
+                    bar_reaches_limit = (
+                        (pending_trade.side > 0 and lo[i] <= limit)
+                        or (pending_trade.side < 0 and h[i] >= limit)
+                    )
+                    if bar_reaches_limit:
+                        broker.open_trade(
+                            symbol=symbol, bar=bar,
+                            side=pending_trade.side, size=pending_trade.size,
+                            stop=pending_trade.stop_price,
+                            take_profit=pending_trade.take_profit,
+                            entry_price=limit,
+                        )
+                        pending_trade = None
+                    # else: limit not reached, keep pending (will be checked next bar
+                    # or replaced by a new signal from on_bar below)
+                else:
+                    # Market order: fill at this bar's open (standard next-bar-open)
+                    broker.open_trade(
+                        symbol=symbol, bar=bar,
+                        side=pending_trade.side, size=pending_trade.size,
+                        stop=pending_trade.stop_price,
+                        take_profit=pending_trade.take_profit,
+                        entry_price=None,
+                    )
+                    pending_trade = None
+
                 open_pos = positions.get(symbol)
                 has_positions = open_pos is not None and len(open_pos) > 0
 
