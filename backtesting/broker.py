@@ -28,8 +28,9 @@ class Broker:
         self.positions: Dict[str, List[Trade]] = {}
         self.closed_trades: List[Trade] = []
 
-    def _price_with_slippage(self, px: float, side: int) -> float:
-        return px * (1 + side * self.portfolio.slippage_bps / 1e4)
+    def _price_with_slippage(self, px: float, side: int, order_size: float = 0.0) -> float:
+        slip_bps = self.portfolio.impact_slippage_bps(order_size)
+        return px * (1 + side * slip_bps / 1e4)
 
     def _commission_cost(self, notional: float) -> float:
         return notional * (self.portfolio.commission_bps / 1e4)
@@ -104,7 +105,7 @@ class Broker:
         if self.portfolio.cash < commission:
             return
 
-        entry_px = self._price_with_slippage(raw_price, side)
+        entry_px = self._price_with_slippage(raw_price, side, size)
 
         # Margin check: ensure equity covers projected margin requirement
         projected_gross = self.portfolio.gross_notional(prices) + notional
@@ -194,7 +195,7 @@ class Broker:
 
     def _close_position(self, tr: Trade, raw_price: float, symbol: str, bar: Bar) -> None:
         """Apply slippage/commission and record the closed trade."""
-        exit_px = self._price_with_slippage(raw_price, -tr.side)
+        exit_px = self._price_with_slippage(raw_price, -tr.side, tr.size)
         notional = abs(exit_px * tr.size)
         commission = self._commission_cost(notional)
         tr.exit_price = exit_px

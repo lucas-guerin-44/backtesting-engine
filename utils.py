@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from config import DATALAKE_URL
+from config import DATALAKE_API_KEY, DATALAKE_URL
 
 LOCAL_DATA_DIR = "./ohlc_data"
 LOCAL_TICK_DIR = "./tick_data"
@@ -62,9 +62,10 @@ def fetch_ohlc(instrument: str, timeframe: str, start_date: str, end_date: str, 
         "limit": page_size,
     }
 
+    headers = {"X-API-Key": DATALAKE_API_KEY} if DATALAKE_API_KEY else {}
     all_rows = []
     while True:
-        resp = requests.get(url, params=params)
+        resp = requests.get(url, params=params, headers=headers)
         resp.raise_for_status()
         body = resp.json()
 

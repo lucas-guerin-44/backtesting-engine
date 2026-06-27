@@ -76,6 +76,11 @@ class Backtester:
             slippage_bps=slippage_bps,
             max_leverage=max_leverage,
             margin_rate=margin_rate,
+            typical_daily_volume=config.typical_daily_volume if config else None,
+            impact_scaling=config.impact_scaling if config else 0.5,
+            daily_volatility=config.daily_volatility if config else None,
+            funding_rate_annual=config.funding_rate_annual if config else 0.0,
+            funding_rate_short=config.funding_rate_short if config else 0.0,
         )
         self.broker = self.portfolio.broker
 
@@ -95,6 +100,11 @@ class Backtester:
 
         # Infer annualization factor from the data's actual frequency
         self.freq_per_year = infer_freq_per_year(self._ts)
+        self._bar_hours = 24.0 * 365.0 / self.freq_per_year if self.freq_per_year > 0 else 1.0
+
+        # Auto-compute daily volatility from data if ADV is set but vol is not
+        if self.portfolio.typical_daily_volume is not None and self.portfolio.daily_volatility is None:
+            self.portfolio.compute_daily_volatility(self._close)
 
         # Pre-allocate output array
         self.equity_curve = np.empty(self.n, dtype=np.float64)
@@ -201,6 +211,11 @@ class Backtester:
 
             # Sync cash from portfolio (may have changed from exits/entry)
             cash = portfolio.cash
+
+            # Accrue funding costs before computing equity
+            if has_positions:
+                portfolio.accrue_funding(self._bar_hours)
+                cash = portfolio.cash
 
             if has_positions:
                 open_pnl = 0.0

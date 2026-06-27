@@ -29,6 +29,16 @@ class BacktestConfig:
     slippage_bps: float = 0.0
     max_leverage: float = 1.0
     margin_rate: float = 0.0
+    typical_daily_volume: Optional[float] = None
+    impact_scaling: float = 0.5
+    daily_volatility: Optional[float] = None
+    funding_rate_annual: float = 0.0
+    funding_rate_short: float = 0.0
+    funding_rate_annual: float = 0.0
+    funding_rate_short: float = 0.0
+    typical_daily_volume: Optional[float] = None
+    impact_scaling: float = 0.5
+    daily_volatility: Optional[float] = None
 
 
 @dataclass

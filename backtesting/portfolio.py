@@ -3,8 +3,9 @@
 Works with the Broker class for multi-asset portfolio-level backtests.
 """
 
-from typing import Dict
+from typing import Dict, Optional
 
+import numpy as np
 import pandas as pd
 
 from backtesting.broker import Broker
@@ -30,12 +31,22 @@ class Portfolio:
 
     def __init__(self, cash: float = 100_000.0, commission_bps: float = 0.5,
                  slippage_bps: float = 1.0, max_leverage: float = 3.0,
-                 margin_rate: float = 0.1):
+                 margin_rate: float = 0.1,
+                 typical_daily_volume: Optional[float] = None,
+                 impact_scaling: float = 0.5,
+                 daily_volatility: Optional[float] = None,
+                 funding_rate_annual: float = 0.0,
+                 funding_rate_short: float = 0.0):
         self.cash = cash
         self.commission_bps = commission_bps
         self.slippage_bps = slippage_bps
         self.max_leverage = max_leverage
         self.margin_rate = margin_rate
+        self.typical_daily_volume = typical_daily_volume
+        self.impact_scaling = impact_scaling
+        self.daily_volatility = daily_volatility
+        self.funding_rate_annual = funding_rate_annual
+        self.funding_rate_short = funding_rate_short
 
         self.equity_curve = []
         self.peak_equity = cash
@@ -45,6 +56,34 @@ class Portfolio:
         self.broker = Broker(self)
         self.trade_count = 0
         self.trades = []
+
+    def impact_slippage_bps(self, order_size: float) -> float:
+        if self.typical_daily_volume is None or self.daily_volatility is None:
+            return self.slippage_bps
+        if self.typical_daily_volume <= 0 or order_size <= 0:
+            return self.slippage_bps
+        participation = order_size / self.typical_daily_volume
+        impact = self.daily_volatility * (participation ** 0.5) * self.impact_scaling
+        return self.slippage_bps + impact
+
+    def compute_daily_volatility(self, close_prices: np.ndarray) -> None:
+        if len(close_prices) < 20:
+            return
+        log_returns = np.diff(np.log(close_prices))
+        self.daily_volatility = float(np.std(log_returns[-60:]) * 10000)
+
+    def accrue_funding(self, bar_hours: float) -> float:
+        if self.funding_rate_annual == 0 and self.funding_rate_short == 0:
+            return 0.0
+        total = 0.0
+        for sym, trades in self.broker.positions.items():
+            for tr in trades:
+                notional = abs(tr.entry_price * tr.size)
+                rate = self.funding_rate_annual if tr.side > 0 else self.funding_rate_short
+                accrual = notional * (rate / 100.0) * (bar_hours / 24.0) / 365.0
+                total += accrual
+        self.cash -= total
+        return total
 
     def record_trade(self, ts, instrument: str, price: float, qty: float,
                      side: int, tag: str = None) -> None:

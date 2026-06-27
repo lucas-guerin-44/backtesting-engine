@@ -124,11 +124,20 @@ class TickBacktester:
             slippage_bps=slippage_bps,
             max_leverage=max_leverage,
             margin_rate=margin_rate,
+            typical_daily_volume=config.typical_daily_volume if config else None,
+            impact_scaling=config.impact_scaling if config else 0.5,
+            daily_volatility=config.daily_volatility if config else None,
+            funding_rate_annual=config.funding_rate_annual if config else 0.0,
+            funding_rate_short=config.funding_rate_short if config else 0.0,
         )
         self.broker = self.portfolio.broker
 
         self.aggregator = TickAggregator(timeframe)
         self.latency_broker = latency_broker
+
+        _tf_hours = {"M1": 1/60, "M5": 5/60, "M15": 15/60, "M30": 30/60,
+                     "H1": 1.0, "H4": 4.0, "D1": 24.0, "W1": 168.0, "MN1": 720.0}
+        self._bar_hours = _tf_hours.get(timeframe, 1.0)
 
         # Detect whether strategy overrides on_tick / manage_position_tick.
         # If not, we skip those calls entirely in the hot loop.
@@ -158,6 +167,10 @@ class TickBacktester:
         self.bar_equity_curve: Optional[np.ndarray] = None
         self.trades: List[Trade] = []
         self.bars: List[Bar] = []
+
+        # Auto-compute daily volatility from tick prices if ADV is set but vol is not
+        if self.portfolio.typical_daily_volume is not None and self.portfolio.daily_volatility is None:
+            self.portfolio.compute_daily_volatility(self._prices)
 
     def run(self) -> Tuple[np.ndarray, List[Trade]]:
         """Run the tick-level backtest.
@@ -282,8 +295,9 @@ class TickBacktester:
                             tp_triggered = True
 
                     if stop_triggered:
-                        # Close at tick price (stop)
-                        exit_px = price * (1 - tr.side * slip_bps / 1e4)
+                        # Close at tick price (stop) with impact-aware slippage
+                        exit_slip = portfolio.impact_slippage_bps(tr.size)
+                        exit_px = price * (1 - tr.side * exit_slip / 1e4)
                         notional = abs(exit_px * tr.size)
                         commission = notional * (comm_bps / 1e4)
                         tr.exit_price = exit_px
@@ -295,9 +309,10 @@ class TickBacktester:
                             still_open = list(open_pos)
                         still_open.remove(tr)
                     elif tp_triggered:
-                        # Close at TP price
+                        # Close at TP price with impact-aware slippage
                         tp_price = tr.take_profit
-                        exit_px = tp_price * (1 - tr.side * slip_bps / 1e4)
+                        exit_slip = portfolio.impact_slippage_bps(tr.size)
+                        exit_px = tp_price * (1 - tr.side * exit_slip / 1e4)
                         notional = abs(exit_px * tr.size)
                         commission = notional * (comm_bps / 1e4)
                         tr.exit_price = exit_px
@@ -347,6 +362,10 @@ class TickBacktester:
 
             # --- Bar completion: call on_bar ---
             if completed_bar is not None:
+                # Accrue funding costs at bar boundary
+                portfolio.accrue_funding(self._bar_hours)
+                cash = portfolio.cash
+
                 completed_bars.append(completed_bar)
                 bar_equities.append(equity)
 
@@ -448,8 +467,9 @@ class TickBacktester:
         if portfolio.cash < commission:
             return
 
-        # Slippage
-        entry_px = price * (1 + side * portfolio.slippage_bps / 1e4)
+        # Slippage (impact-aware)
+        total_slip = portfolio.impact_slippage_bps(size)
+        entry_px = price * (1 + side * total_slip / 1e4)
 
         # Margin check
         projected_gross = gross + notional

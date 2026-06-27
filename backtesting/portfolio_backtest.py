@@ -156,6 +156,11 @@ class PortfolioBacktester:
             self._costs[sym] = {
                 "commission_bps": overrides.get("commission_bps", commission_bps),
                 "slippage_bps": overrides.get("slippage_bps", slippage_bps),
+                "typical_daily_volume": overrides.get("typical_daily_volume", None),
+                "impact_scaling": overrides.get("impact_scaling", 0.5),
+                "daily_volatility": overrides.get("daily_volatility", None),
+                "funding_rate_long": overrides.get("funding_rate_long", 0.0),
+                "funding_rate_short": overrides.get("funding_rate_short", 0.0),
             }
         self.starting_cash = starting_cash
         self.rebalance_frequency = rebalance_frequency
@@ -182,6 +187,15 @@ class PortfolioBacktester:
 
         # Infer annualization factor from the aligned timeline
         self.freq_per_year = infer_freq_per_year(self._ts)
+        self._bar_hours = 24.0 * 365.0 / self.freq_per_year if self.freq_per_year > 0 else 1.0
+
+        # Auto-compute daily volatility per symbol from close data
+        for sym in self.symbols:
+            if self._costs[sym].get("typical_daily_volume") is not None and self._costs[sym].get("daily_volatility") is None:
+                close_arr = self._close[sym]
+                if len(close_arr) >= 20:
+                    log_ret = np.diff(np.log(close_arr))
+                    self._costs[sym]["daily_volatility"] = float(np.std(log_ret[-60:]) * 10000)
 
     def _align_data(self, dataframes: Dict[str, pd.DataFrame]) -> None:
         """Union all timestamps, forward-fill, and pre-extract numpy arrays."""
@@ -300,6 +314,11 @@ class PortfolioBacktester:
                     sym_costs = self._costs[sym]
                     portfolio.commission_bps = sym_costs["commission_bps"]
                     portfolio.slippage_bps = sym_costs["slippage_bps"]
+                    portfolio.typical_daily_volume = sym_costs.get("typical_daily_volume")
+                    portfolio.impact_scaling = sym_costs.get("impact_scaling", 0.5)
+                    portfolio.daily_volatility = sym_costs.get("daily_volatility")
+                    portfolio.funding_rate_annual = sym_costs.get("funding_rate_long", 0.0)
+                    portfolio.funding_rate_short = sym_costs.get("funding_rate_short", 0.0)
 
                     bar = Bar(ts[i], o[sym][i], h[sym][i], lo[sym][i], c[sym][i])
                     # Let strategy manage open positions (trailing stops, etc.)
@@ -350,6 +369,11 @@ class PortfolioBacktester:
                 sym_costs = self._costs[sym]
                 portfolio.commission_bps = sym_costs["commission_bps"]
                 portfolio.slippage_bps = sym_costs["slippage_bps"]
+                portfolio.typical_daily_volume = sym_costs.get("typical_daily_volume")
+                portfolio.impact_scaling = sym_costs.get("impact_scaling", 0.5)
+                portfolio.daily_volatility = sym_costs.get("daily_volatility")
+                portfolio.funding_rate_annual = sym_costs.get("funding_rate_long", 0.0)
+                portfolio.funding_rate_short = sym_costs.get("funding_rate_short", 0.0)
 
                 # Pass all current prices for accurate multi-asset buying power
                 all_prices = {s: c[s][i] for s in symbols}
@@ -433,6 +457,11 @@ class PortfolioBacktester:
                 sym_costs = self._costs[sym]
                 portfolio.commission_bps = sym_costs["commission_bps"]
                 portfolio.slippage_bps = sym_costs["slippage_bps"]
+                portfolio.typical_daily_volume = sym_costs.get("typical_daily_volume")
+                portfolio.impact_scaling = sym_costs.get("impact_scaling", 0.5)
+                portfolio.daily_volatility = sym_costs.get("daily_volatility")
+                portfolio.funding_rate_annual = sym_costs.get("funding_rate_long", 0.0)
+                portfolio.funding_rate_short = sym_costs.get("funding_rate_short", 0.0)
 
                 all_prices = {s: c[s][i] for s in symbols}
                 pos_before = len(positions.get(sym, []))
@@ -453,6 +482,20 @@ class PortfolioBacktester:
                 ))
 
             # Sync cash after all exits and entries
+            cash = portfolio.cash
+
+            # Accrue funding costs for all open positions
+            # Use per-symbol rates — iterate through positions
+            for sym in symbols:
+                open_pos = positions.get(sym, [])
+                if open_pos:
+                    sym_costs = self._costs[sym]
+                    fl = sym_costs.get("funding_rate_long", 0.0)
+                    fs = sym_costs.get("funding_rate_short", 0.0)
+                    if fl > 0 or fs > 0:
+                        portfolio.funding_rate_annual = fl
+                        portfolio.funding_rate_short = fs
+                        portfolio.accrue_funding(self._bar_hours)
             cash = portfolio.cash
 
             # PHASE 3: Recompute allocation weights if needed
