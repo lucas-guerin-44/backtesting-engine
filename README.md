@@ -16,10 +16,12 @@ Data sourced from [lucas-guerin-44/datalake-api](https://github.com/lucas-guerin
 - **Latency-aware execution layer**: `LatencyAwareBroker` queues orders and fills them after a configurable delay (models network RTT + exchange queue time). Supports `MARKET`, `LIMIT`, and `STOP` order types with conditional fill logic. Market orders fill at `tick.ask`/`tick.bid` when spread data is present. Pluggable latency models: `FixedLatency`, `GaussianLatency`, `LogNormalLatency`, `ComponentLatency` (per-leg decomposition). Built-in `compare_latency_impact()` measures fill latency, slippage vs zero-latency baseline, and Sharpe drag
 - **FIFO order book**: synthetic resting-order layer with price-level queues, partial fills via `max_qty_per_level`, and queue-position-aware matching. Strategies can submit limit orders that rest until price crosses, getting price improvement over market orders
 - **Gap-aware stops**: if price gaps past a stop level, fills at the open (worse price), not the stop
+- **Market impact model**: square-root impact (`impact_bps = sigma * sqrt(Q/ADV) * k`) so larger orders pay more slippage. Auto-computes daily volatility from rolling returns. User provides ADV per instrument — when omitted, falls back to flat bps (backward-compatible)
+- **Funding cost simulation**: daily accrual of overnight swap costs deducted from cash while positions are held. Separate long/short annual rates, scales with bar frequency. Disabled by default (backward-compatible)
 - **Multi-asset portfolios**: shared cash, cross-asset risk limits, 4 allocation schemes (equal weight, risk parity, correlation-aware, regime-aware)
 - **Bayesian optimization**: Optuna TPE with walk-forward validation and parameter constraints
 - **Statistical testing**: bootstrap CI, permutation test, Deflated Sharpe Ratio (Bailey & Lopez de Prado 2014)
-- **354 tests** across 19 modules in ~4s, includes cross-engine consistency checks (event-driven vs vectorized produce equivalent results), tick-vs-bar convergence tests, walk-forward contamination regression tests (proves OOS data never leaks into training), and indicator edge-case / vectorized-vs-incremental consistency checks. Reproducible benchmark scripts in `benchmarks/`
+- **369 tests** across 21 modules in ~4s, includes cross-engine consistency checks (event-driven vs vectorized produce equivalent results), tick-vs-bar convergence tests, walk-forward contamination regression tests (proves OOS data never leaks into training), and indicator edge-case / vectorized-vs-incremental consistency checks. Reproducible benchmark scripts in `benchmarks/`
 
 ## Architecture
 
@@ -113,7 +115,14 @@ from backtesting.backtest import Backtester
 from backtesting.types import BacktestConfig
 from strategies import MomentumStrategy
 
-config = BacktestConfig(starting_cash=10_000, commission_bps=5.0, slippage_bps=2.0)
+config = BacktestConfig(
+    starting_cash=10_000,
+    commission_bps=5.0,
+    slippage_bps=2.0,
+    typical_daily_volume=500_000,   # ADV for impact model (None = disabled)
+    funding_rate_annual=5.0,        # long swap rate % (0.0 = disabled)
+    funding_rate_short=8.0,         # short swap rate %
+)
 bt = Backtester(df, MomentumStrategy(trend_filter_period=200), config=config, symbol="XAUUSD")
 equity_curve, trades = bt.run()
 ```
@@ -155,6 +164,14 @@ pbt = PortfolioBacktester(
     config=config,
     rebalance_frequency=21,
     risk_limits=RiskLimits(max_gross_exposure=0.9, max_single_asset=0.30),
+    costs_by_symbol={
+        "XAUUSD": {"commission_bps": 5, "slippage_bps": 3,
+                   "typical_daily_volume": 200_000, "funding_rate_long": 3.0, "funding_rate_short": 5.0},
+        "EURUSD": {"commission_bps": 2, "slippage_bps": 1,
+                   "typical_daily_volume": 5_000_000, "funding_rate_long": 4.0, "funding_rate_short": 2.0},
+        "NDX100": {"commission_bps": 3, "slippage_bps": 1,
+                   "typical_daily_volume": 500_000, "funding_rate_long": 5.0, "funding_rate_short": 8.0},
+    },
 )
 result = pbt.run()
 ```
@@ -254,7 +271,5 @@ See [docs/research.md](docs/research.md) for a write-up of the research process:
 
 ## Known Limitations
 
-- **Flat slippage model (bar-level broker only).** The bar-level `Broker` applies a fixed basis-point cost regardless of order size or liquidity. The tick-level `LatencyAwareBroker` already uses real bid/ask spread when present in tick data — no slippage bps needed for spread cost. Neither model accounts for market impact (large orders moving the price).
-- **No funding costs.** No overnight financing simulation for leveraged or multi-day positions.
 - **No calendar awareness.** All bars are treated as equal, no weekends, holidays, or trading sessions.
 - **Tick backtester is single-asset only.** No portfolio-level tick backtesting yet (bar-level portfolio backtester handles multi-asset).
