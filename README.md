@@ -113,7 +113,6 @@ python -m pytest tests/ -x -q
 
 ## See also
 
-- **[portfolio-engine](../portfolio-engine/)** — Multi-asset portfolio backtesting with allocation schemes and risk limits (separate package)
 - **[datalake-api](https://github.com/lucas-guerin-44/datalake-api)** — Data pipeline for OHLC/tick data
 - **[docs/research.md](docs/research.md)** — Research process: diagnosing overfitting, fixing methodology
 - **[docs/backtester_engineering.md](docs/backtester_engineering.md)** — Full engineering walkthrough
