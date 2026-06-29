@@ -398,7 +398,7 @@ class TestTickBacktester:
         # Check that the position was entered at the tick price after the bar
         open_trades = bt.positions
         closed_trades = bt.trades
-        all_trades = open_trades + closed_trades
+        all_trades = list(open_trades) + closed_trades
         assert len(all_trades) >= 1
         # Entry should be around 105 (the next tick after bar completion),
         # not 100 (the bar's close). Slippage may shift it slightly.

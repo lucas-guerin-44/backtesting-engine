@@ -115,9 +115,6 @@ class LatencyAwareBroker:
     def has_open_position(self, symbol: str) -> bool:
         return self._broker.has_open_position(symbol)
 
-    def position_side(self, symbol: str) -> int:
-        return self._broker.position_side(symbol)
-
     def update_stop(self, symbol: str, new_stop: float) -> None:
         self._broker.update_stop(symbol, new_stop)
 
@@ -170,6 +167,29 @@ class LatencyAwareBroker:
             self._process_tick_simple(tick)
 
     # ------------------------------------------------------------------
+    # Common helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_stop_activation(po: "PendingOrder", tick_price: float) -> bool:
+        """Check if a STOP order should activate at the given tick price.
+
+        Returns True if the order was just activated (first time crossing
+        the trigger), or if it was already activated. Returns False if
+        the trigger has not been reached yet.
+        """
+        order = po.order
+        if po.activated:
+            return True
+        if order.side > 0 and tick_price >= order.stop_trigger:
+            po.activated = True
+            return True
+        if order.side < 0 and tick_price <= order.stop_trigger:
+            po.activated = True
+            return True
+        return False
+
+    # ------------------------------------------------------------------
     # Engine path (order_book wired in)
     # ------------------------------------------------------------------
 
@@ -189,12 +209,7 @@ class LatencyAwareBroker:
             order = po.order
 
             if order.type == OrderType.STOP:
-                if not po.activated:
-                    if order.side > 0 and tick_price >= order.stop_trigger:
-                        po.activated = True
-                    elif order.side < 0 and tick_price <= order.stop_trigger:
-                        po.activated = True
-                if not po.activated:
+                if not self._check_stop_activation(po, tick_price):
                     still_pending.append(po)
                     continue
                 if tick_ns >= po.fill_after_ns:
@@ -253,12 +268,7 @@ class LatencyAwareBroker:
             order = po.order
 
             if order.type == OrderType.STOP:
-                if not po.activated:
-                    if order.side > 0 and tick_price >= order.stop_trigger:
-                        po.activated = True
-                    elif order.side < 0 and tick_price <= order.stop_trigger:
-                        po.activated = True
-                if not po.activated:
+                if not self._check_stop_activation(po, tick_price):
                     still_pending.append(po)
                     continue
                 if tick_ns >= po.fill_after_ns:

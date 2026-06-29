@@ -328,4 +328,4 @@ class VectorizedBacktester:
         if prev_end < n:
             equity[prev_end:] += realized
 
-        return np.maximum(equity, 0.0)
+        return equity

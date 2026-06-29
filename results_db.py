@@ -151,12 +151,12 @@ class ResultsDB:
         win_rate = len(wins) / total * 100 if total > 0 else 0.0
 
         # Serialize params (convert numpy types to Python types)
-        clean_params = {k: _to_python(v) for k, v in params.items()}
+        params_json = json.dumps(params, cls=_NumpyEncoder)
 
         cur = self.conn.execute(
             "INSERT INTO runs (strategy_name, params_json, objective, starting_cash, "
             "commission_bps, slippage_bps, data_hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (strategy_name, json.dumps(clean_params), objective, starting_cash,
+            (strategy_name, params_json, objective, starting_cash,
              commission_bps, slippage_bps, data_hash),
         )
         run_id = cur.lastrowid
@@ -207,7 +207,7 @@ class ResultsDB:
         # Store individual splits
         for s in wf_result.splits:
             best_params = s.get("best_params", {})
-            clean_params = {k: _to_python(v) for k, v in best_params.items()}
+            params_json = json.dumps(best_params, cls=_NumpyEncoder)
             self.conn.execute(
                 "INSERT INTO walk_forward_splits (wf_run_id, split_idx, train_start, "
                 "train_end, test_start, test_end, is_score, oos_score, oos_return, "
@@ -216,7 +216,7 @@ class ResultsDB:
                  s.get("test_start"), s.get("test_end"),
                  s.get("in_sample_score"), s.get("out_of_sample_score"),
                  s.get("oos_return_pct"), s.get("oos_max_dd_pct"),
-                 json.dumps(clean_params)),
+                 params_json),
             )
 
         self.conn.commit()
@@ -336,15 +336,16 @@ class ResultsDB:
         self.close()
 
 
-def _to_python(v):
-    """Convert numpy types to Python types for JSON serialization."""
-    if isinstance(v, (np.integer,)):
-        return int(v)
-    if isinstance(v, (np.floating,)):
-        return float(v)
-    if isinstance(v, np.ndarray):
-        return v.tolist()
-    return v
+class _NumpyEncoder(json.JSONEncoder):
+    """Handle numpy types in JSON serialization."""
+    def default(self, o):
+        if isinstance(o, np.integer):
+            return int(o)
+        if isinstance(o, np.floating):
+            return float(o)
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        return super().default(o)
 
 
 # ---------------------------------------------------------------------------

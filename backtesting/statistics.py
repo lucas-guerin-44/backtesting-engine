@@ -437,3 +437,167 @@ def compute_statistical_report(
         )
 
     return StatisticalReport(bootstrap_ci=ci, permutation_test=perm, deflated_sharpe=dsr)
+
+
+# ---------------------------------------------------------------------------
+# Convenience: compute_stats (replaces per-experiment metric functions)
+# ---------------------------------------------------------------------------
+
+def compute_stats(
+    equity_curve,
+    trades: list,
+    freq_per_year: int = 252,
+    risk_free: float = 0.0,
+) -> dict:
+    """Compute a standard set of backtest statistics from an equity curve.
+
+    Returns a dict with keys:
+        sharpe, sortino, calmar, max_drawdown, cagr, total_return_pct,
+        win_rate, profit_factor, avg_win, avg_loss, total_trades,
+        bars_in_market, avg_bars_held
+
+    Parameters
+    ----------
+    equity_curve : array-like
+        Sequence of portfolio equity values over time.
+    trades : list
+        List of Trade objects (each must have .pnl, .bars_held attributes).
+    freq_per_year : int
+        Number of observation periods per year (252 for daily).
+    risk_free : float
+        Annual risk-free rate (default 0).
+    """
+    eq = np.asarray(equity_curve, dtype=np.float64)
+
+    # Filter out leading zeros (warmup period)
+    valid = eq > 1e-8
+    if not np.any(valid):
+        return {k: 0.0 for k in [
+            "sharpe", "sortino", "calmar", "max_drawdown", "cagr",
+            "total_return_pct", "win_rate", "profit_factor",
+            "avg_win", "avg_loss", "total_trades", "bars_in_market",
+            "avg_bars_held",
+        ]}
+
+    eq = eq[valid]
+
+    # Sharpe (reuse compute_sharpe)
+    sharpe = compute_sharpe(eq, risk_free=risk_free, freq_per_year=freq_per_year)
+
+    # Returns (for Sortino, CAGR, etc.)
+    returns = np.diff(eq) / eq[:-1]
+    if risk_free > 0:
+        returns = returns - risk_free / freq_per_year
+
+    # Sortino
+    downside = returns[returns < 0]
+    downside_std = np.std(downside, ddof=1) if len(downside) > 1 else 0.0
+    sortino = (np.mean(returns) / downside_std * np.sqrt(freq_per_year)) if downside_std > 0 else 0.0
+
+    # Max drawdown
+    peak = np.maximum.accumulate(eq)
+    dd = (peak - eq) / np.where(peak > 0, peak, 1.0)
+    max_dd = float(np.max(dd)) if len(dd) > 0 else 0.0
+
+    # CAGR
+    n_years = len(eq) / freq_per_year
+    cagr = (eq[-1] / eq[0]) ** (1.0 / n_years) - 1.0 if n_years > 0 and eq[0] > 0 else 0.0
+
+    # Calmar
+    calmar = cagr / max_dd if max_dd > 0 else 0.0
+
+    # Total return
+    total_return_pct = (eq[-1] - eq[0]) / eq[0] * 100.0 if eq[0] > 0 else 0.0
+
+    # Trade-level stats
+    pnls = np.array([t.pnl for t in trades if t.pnl is not None], dtype=np.float64)
+    n_trades = len(pnls)
+
+    if n_trades > 0:
+        wins = pnls[pnls > 0]
+        losses = pnls[pnls < 0]
+        win_rate = len(wins) / n_trades * 100.0
+        gross_profit = float(np.sum(wins)) if len(wins) > 0 else 0.0
+        gross_loss = float(np.abs(np.sum(losses))) if len(losses) > 0 else 0.0
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+        avg_win = float(np.mean(wins)) if len(wins) > 0 else 0.0
+        avg_loss = float(np.mean(losses)) if len(losses) > 0 else 0.0
+    else:
+        win_rate = 0.0
+        profit_factor = 0.0
+        avg_win = 0.0
+        avg_loss = 0.0
+
+    bars_held = [t.bars_held for t in trades if t.bars_held is not None]
+    avg_bars_held = float(np.mean(bars_held)) if bars_held else 0.0
+
+    return {
+        "sharpe": round(float(sharpe), 4),
+        "sortino": round(float(sortino), 4),
+        "calmar": round(float(calmar), 4),
+        "max_drawdown": round(max_dd * 100, 2),
+        "cagr": round(cagr * 100, 2),
+        "total_return_pct": round(total_return_pct, 2),
+        "win_rate": round(win_rate, 1),
+        "profit_factor": round(profit_factor, 2),
+        "avg_win": round(avg_win, 4),
+        "avg_loss": round(avg_loss, 4),
+        "total_trades": n_trades,
+        "bars_in_market": sum(bars_held) if bars_held else 0,
+        "avg_bars_held": round(avg_bars_held, 1),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Convenience: print_report (standard formatted output)
+# ---------------------------------------------------------------------------
+
+def print_report(
+    label: str,
+    equity_curve,
+    trades: list,
+    freq_per_year: int = 252,
+    years: float = None,
+) -> dict:
+    """Print a standard formatted report and return the stats dict.
+
+    Replaces per-experiment report_run() functions with a single standard.
+
+    Parameters
+    ----------
+    label : str
+        Strategy/experiment name for the header.
+    equity_curve : array-like
+        Portfolio equity values.
+    trades : list
+        List of Trade objects.
+    freq_per_year : int
+        Bars per year (252 for daily, 6292 for H1, etc.).
+    years : float, optional
+        Override for annualization period. If None, inferred from data length.
+    """
+    eq = np.asarray(equity_curve, dtype=np.float64)
+    stats = compute_stats(eq, trades, freq_per_year=freq_per_year)
+
+    if years is None:
+        valid_len = int(np.sum(eq > 1e-8)) if len(eq) > 0 else 0
+        years = valid_len / freq_per_year if freq_per_year > 0 else 1.0
+
+    print()
+    print("=" * 50)
+    print(f"  {label}")
+    print("=" * 50)
+    print(f"  Total Return:     {stats['total_return_pct']:>+8.2f}%")
+    print(f"  CAGR:             {stats['cagr']:>+8.2f}%")
+    print(f"  Max Drawdown:     {stats['max_drawdown']:>8.2f}%")
+    print(f"  Sharpe:           {stats['sharpe']:>8.4f}")
+    print(f"  Sortino:          {stats['sortino']:>8.4f}")
+    print(f"  Calmar:           {stats['calmar']:>8.4f}")
+    print(f"  Win Rate:         {stats['win_rate']:>8.1f}%")
+    print(f"  Profit Factor:    {stats['profit_factor']:>8.2f}")
+    print(f"  Total Trades:     {stats['total_trades']:>8d}")
+    print(f"  Avg Bars Held:    {stats['avg_bars_held']:>8.1f}")
+    print(f"  Period:           {years:>8.1f} years")
+    print()
+
+    return stats

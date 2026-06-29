@@ -88,6 +88,7 @@ class TrendFollowingStrategy(Strategy):
         allow_reentry: bool = False,
         trend_filter_period: int = 0,
     ):
+        super().__init__()
         self.atr_stop_mult = atr_stop_mult
         self.atr_target_mult = atr_target_mult
         self.risk_per_trade = risk_per_trade
@@ -102,12 +103,8 @@ class TrendFollowingStrategy(Strategy):
         self._trend_filter = TrendFilter(trend_filter_period)
         self._prev_fast: Optional[float] = None
         self._prev_slow: Optional[float] = None
-        self._peak_equity = 0.0
-        self._bars_since_trade = 999
         self._current_atr: float = 0.0
         self._has_position = False
-        # Track the trend direction established by the last crossover.
-        # +1 = bullish trend, -1 = bearish trend, 0 = no trend yet.
         self._trend_side: int = 0
 
     def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Trade]:
@@ -115,13 +112,10 @@ class TrendFollowingStrategy(Strategy):
         slow_val = self._slow_ema.update(bar.close)
         atr_val = self._atr.update(bar.high, bar.low, bar.close)
         self._trend_filter.update(bar.close)
-        self._peak_equity = max(self._peak_equity, equity)
-        self._bars_since_trade += 1
+        self._update_tracking(equity)
         if atr_val is not None:
             self._current_atr = atr_val
 
-        # Reset position flag -- manage_position() already set it True
-        # this bar if a position still exists (it runs before on_bar).
         was_in_position = self._has_position
         self._has_position = False
 
@@ -131,7 +125,7 @@ class TrendFollowingStrategy(Strategy):
         if self._prev_fast is None or self._prev_slow is None:
             self._prev_fast, self._prev_slow = fast_val, slow_val
             return None
-        if self._bars_since_trade < self.cooldown_bars:
+        if not self._can_trade():
             self._prev_fast, self._prev_slow = fast_val, slow_val
             return None
         if was_in_position:
@@ -140,30 +134,23 @@ class TrendFollowingStrategy(Strategy):
 
         trade = None
 
-        # Detect crossovers (primary entry signals)
         bullish_cross = self._prev_fast <= self._prev_slow and fast_val > slow_val
         bearish_cross = self._prev_fast >= self._prev_slow and fast_val < slow_val
 
-        # Update trend direction on crossover
         if bullish_cross:
             self._trend_side = 1
         elif bearish_cross:
             self._trend_side = -1
 
-        # Primary entry: crossover
         if bullish_cross and bar.close > slow_val:
             trade = self._build_trade(bar, 1, atr_val, equity)
-
         elif bearish_cross and bar.close < slow_val:
             trade = self._build_trade(bar, -1, atr_val, equity)
-
-        # Re-entry: stopped out but trend is still intact
         elif self.allow_reentry and self._trend_side != 0:
             if (self._trend_side == 1
                     and fast_val > slow_val
                     and bar.close > fast_val):
                 trade = self._build_trade(bar, 1, atr_val, equity)
-
             elif (self._trend_side == -1
                   and fast_val < slow_val
                   and bar.close < fast_val):
@@ -183,12 +170,10 @@ class TrendFollowingStrategy(Strategy):
               else entry + side * atr_val * self.atr_target_mult)
         size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
                                   self._peak_equity, self.max_dd_halt)
-        if size > 0:
-            self._bars_since_trade = 0
+        result = self._make_trade(bar, side, entry, stop, tp, size)
+        if result is not None:
             self._has_position = True
-            return Trade(entry_bar=bar, side=side, size=size,
-                         entry_price=entry, stop_price=stop, take_profit=tp)
-        return None
+        return result
 
     def manage_position(self, bar: Bar, trade: Trade) -> None:
         """Mark position as open; trail the stop if enabled."""

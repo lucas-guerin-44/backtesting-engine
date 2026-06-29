@@ -33,6 +33,7 @@ class MomentumStrategy(Strategy):
         cooldown_bars: int = 10,
         trend_filter_period: int = 0,
     ):
+        super().__init__()
         self.lookback = lookback
         self.entry_threshold = entry_threshold
         self.atr_stop_mult = atr_stop_mult
@@ -44,19 +45,16 @@ class MomentumStrategy(Strategy):
         self._atr = ATR(atr_period)
         self._closes: deque = deque(maxlen=lookback + 1)
         self._trend_filter = TrendFilter(trend_filter_period)
-        self._peak_equity = 0.0
-        self._bars_since_trade = 999
 
     def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Trade]:
         self._closes.append(bar.close)
         atr_val = self._atr.update(bar.high, bar.low, bar.close)
         self._trend_filter.update(bar.close)
-        self._peak_equity = max(self._peak_equity, equity)
-        self._bars_since_trade += 1
+        self._update_tracking(equity)
 
         if len(self._closes) <= self.lookback or atr_val is None or atr_val <= 0:
             return None
-        if self._bars_since_trade < self.cooldown_bars:
+        if not self._can_trade():
             return None
 
         roc = (self._closes[-1] - self._closes[0]) / self._closes[0]
@@ -69,10 +67,7 @@ class MomentumStrategy(Strategy):
             tp = entry + atr_val * self.atr_target_mult
             size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
                                       self._peak_equity, self.max_dd_halt)
-            if size > 0:
-                self._bars_since_trade = 0
-                return Trade(entry_bar=bar, side=1, size=size,
-                             entry_price=entry, stop_price=stop, take_profit=tp)
+            return self._make_trade(bar, 1, entry, stop, tp, size)
 
         if roc < -self.entry_threshold:
             if not self._trend_filter.allows(-1, bar.close):
@@ -82,9 +77,6 @@ class MomentumStrategy(Strategy):
             tp = entry - atr_val * self.atr_target_mult
             size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
                                       self._peak_equity, self.max_dd_halt)
-            if size > 0:
-                self._bars_since_trade = 0
-                return Trade(entry_bar=bar, side=-1, size=size,
-                             entry_price=entry, stop_price=stop, take_profit=tp)
+            return self._make_trade(bar, -1, entry, stop, tp, size)
 
         return None

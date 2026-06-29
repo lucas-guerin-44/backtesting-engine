@@ -32,6 +32,7 @@ class DonchianBreakoutStrategy(Strategy):
         cooldown_bars: int = 10,
         trend_filter_period: int = 0,
     ):
+        super().__init__()
         self.channel_period = channel_period
         self.atr_stop_mult = atr_stop_mult
         self.risk_reward = risk_reward
@@ -43,20 +44,17 @@ class DonchianBreakoutStrategy(Strategy):
         self._highs: deque = deque(maxlen=channel_period + 1)
         self._lows: deque = deque(maxlen=channel_period + 1)
         self._trend_filter = TrendFilter(trend_filter_period)
-        self._peak_equity = 0.0
-        self._bars_since_trade = 999
 
     def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Trade]:
         self._highs.append(bar.high)
         self._lows.append(bar.low)
         atr_val = self._atr.update(bar.high, bar.low, bar.close)
         self._trend_filter.update(bar.close)
-        self._peak_equity = max(self._peak_equity, equity)
-        self._bars_since_trade += 1
+        self._update_tracking(equity)
 
         if len(self._highs) <= self.channel_period or atr_val is None or atr_val <= 0:
             return None
-        if self._bars_since_trade < self.cooldown_bars:
+        if not self._can_trade():
             return None
 
         # Channel from lookback window (excluding current bar)
@@ -73,10 +71,7 @@ class DonchianBreakoutStrategy(Strategy):
             tp = entry + (entry - stop) * self.risk_reward
             size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
                                       self._peak_equity, self.max_dd_halt)
-            if size > 0:
-                self._bars_since_trade = 0
-                return Trade(entry_bar=bar, side=1, size=size,
-                             entry_price=entry, stop_price=stop, take_profit=tp)
+            return self._make_trade(bar, 1, entry, stop, tp, size)
 
         if bar.close < ch_low:
             if not self._trend_filter.allows(-1, bar.close):
@@ -86,9 +81,6 @@ class DonchianBreakoutStrategy(Strategy):
             tp = entry - (stop - entry) * self.risk_reward
             size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
                                       self._peak_equity, self.max_dd_halt)
-            if size > 0:
-                self._bars_since_trade = 0
-                return Trade(entry_bar=bar, side=-1, size=size,
-                             entry_price=entry, stop_price=stop, take_profit=tp)
+            return self._make_trade(bar, -1, entry, stop, tp, size)
 
         return None

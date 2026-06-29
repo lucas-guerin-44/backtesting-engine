@@ -5,13 +5,14 @@ Provides the trade execution layer for the Backtester with:
 - Margin check before entry
 - Gap-aware stop-loss execution (fills at open if price gaps past stop)
 - Per-trade slippage and commission
+- FIFO/LIFO netting via Position lot management
 """
 
 from typing import Dict, List, Optional
 
 import pandas as pd
 
-from backtesting.types import Bar, Trade
+from backtesting.types import Bar, Lot, Position, Trade
 
 
 class Broker:
@@ -25,7 +26,7 @@ class Broker:
 
     def __init__(self, portfolio):
         self.portfolio = portfolio
-        self.positions: Dict[str, List[Trade]] = {}
+        self.positions: Dict[str, Position] = {}
         self.closed_trades: List[Trade] = []
 
     def _price_with_slippage(self, px: float, side: int, order_size: float = 0.0) -> float:
@@ -42,27 +43,21 @@ class Broker:
         return max(0.0, limit - gross)
 
     def has_open_position(self, symbol: str) -> bool:
-        """Return True if there is at least one open trade for this symbol."""
+        """Return True if there is at least one open lot for this symbol."""
         return symbol in self.positions and len(self.positions[symbol]) > 0
 
-    def position_side(self, symbol: str) -> int:
-        """Return the net side of open positions (+1 long, -1 short, 0 flat)."""
-        if not self.has_open_position(symbol):
-            return 0
-        return self.positions[symbol][0].side
-
     def update_stop(self, symbol: str, new_stop: float) -> None:
-        """Update the stop price for all open trades of a symbol."""
+        """Update the stop price for all open lots of a symbol."""
         if symbol not in self.positions:
             return
-        for tr in self.positions[symbol]:
-            tr.stop_price = new_stop
+        for lot in self.positions[symbol]:
+            lot.stop_price = new_stop
 
     def open_trade(self, symbol: str, bar: Bar, side: int, size: float,
                    stop: float, take_profit: float,
                    entry_price: Optional[float] = None,
                    current_prices: Optional[Dict[str, float]] = None) -> None:
-        """Open a new trade, subject to buying power and margin checks.
+        """Open a new lot, subject to buying power and margin checks.
 
         Parameters
         ----------
@@ -114,16 +109,14 @@ class Broker:
         if projected_equity < projected_margin:
             return
 
-        trade = Trade(
+        lot = Lot(
             entry_bar=bar, side=side, size=size, entry_price=entry_px,
-            stop_price=stop, take_profit=take_profit,
+            stop_price=stop, take_profit=take_profit, symbol=symbol,
         )
-        trade.bars_held = 0
 
-        self.positions.setdefault(symbol, []).append(trade)
+        self.positions.setdefault(symbol, Position()).append(lot)
         self.portfolio.cash -= commission
         self.portfolio.trade_count += 1
-        self.portfolio.record_trade(bar.ts, symbol, entry_px, size, side, tag="entry")
 
     def position_size(self, symbol: str, price: float, stop: float,
                       risk_fraction: float = 0.01) -> float:
@@ -144,62 +137,110 @@ class Broker:
 
         If the bar opens past the stop (gap), the fill is at the open price
         (worse than the stop). Otherwise, the fill is at the stop price.
+        Each lot is checked individually (lot-level stop management).
         """
         if symbol not in self.positions:
             return
         still_open = []
-        for tr in self.positions[symbol]:
+        for lot in self.positions[symbol]:
             exit_raw = None
-            if tr.side > 0:
-                if bar.open <= tr.stop_price:
+            if lot.side > 0:
+                if bar.open <= lot.stop_price:
                     exit_raw = bar.open  # Gapped through stop
-                elif bar.low <= tr.stop_price <= bar.high:
-                    exit_raw = tr.stop_price
+                elif bar.low <= lot.stop_price <= bar.high:
+                    exit_raw = lot.stop_price
             else:
-                if bar.open >= tr.stop_price:
+                if bar.open >= lot.stop_price:
                     exit_raw = bar.open  # Gapped through stop
-                elif bar.low <= tr.stop_price <= bar.high:
-                    exit_raw = tr.stop_price
+                elif bar.low <= lot.stop_price <= bar.high:
+                    exit_raw = lot.stop_price
 
             if exit_raw is not None:
-                self._close_position(tr, exit_raw, symbol, bar)
+                self._close_lot(lot, exit_raw, symbol, bar)
             else:
-                still_open.append(tr)
-        self.positions[symbol] = still_open
+                still_open.append(lot)
+        self.positions[symbol].lots = still_open
 
     def close_due_to_tp(self, symbol: str, bar: Bar) -> None:
-        """Execute take-profit orders."""
+        """Execute take-profit orders. Each lot checked individually."""
         if symbol not in self.positions:
             return
         still_open = []
-        for tr in self.positions[symbol]:
+        for lot in self.positions[symbol]:
             exit_raw = None
-            if tr.take_profit is not None:
-                if tr.side > 0 and bar.high >= tr.take_profit:
-                    exit_raw = tr.take_profit
-                elif tr.side < 0 and bar.low <= tr.take_profit:
-                    exit_raw = tr.take_profit
+            if lot.take_profit is not None:
+                if lot.side > 0 and bar.high >= lot.take_profit:
+                    exit_raw = lot.take_profit
+                elif lot.side < 0 and bar.low <= lot.take_profit:
+                    exit_raw = lot.take_profit
 
             if exit_raw is not None:
-                self._close_position(tr, exit_raw, symbol, bar)
+                self._close_lot(lot, exit_raw, symbol, bar)
             else:
-                still_open.append(tr)
-        self.positions[symbol] = still_open
+                still_open.append(lot)
+        self.positions[symbol].lots = still_open
 
-    def close_trade(self, symbol: str, tr: Trade, bar: Bar) -> None:
-        """Force-close a specific trade at the bar's open price."""
-        if symbol not in self.positions or tr not in self.positions[symbol]:
+    def close_trade(self, symbol: str, lot: Lot, bar: Bar) -> None:
+        """Force-close a specific lot at the bar's open price."""
+        if symbol not in self.positions or lot not in self.positions[symbol]:
             return
-        self._close_position(tr, bar.open, symbol, bar)
-        self.positions[symbol].remove(tr)
+        self._close_lot(lot, bar.open, symbol, bar)
+        self.positions[symbol].remove(lot)
 
-    def _close_position(self, tr: Trade, raw_price: float, symbol: str, bar: Bar) -> None:
-        """Apply slippage/commission and record the closed trade."""
-        exit_px = self._price_with_slippage(raw_price, -tr.side, tr.size)
-        notional = abs(exit_px * tr.size)
+    def _close_lot(self, lot: Lot, raw_price: float, symbol: str, bar: Bar) -> None:
+        """Apply slippage/commission, convert lot to trade, and record it."""
+        exit_px = self._price_with_slippage(raw_price, -lot.side, lot.size)
+        notional = abs(exit_px * lot.size)
         commission = self._commission_cost(notional)
-        tr.exit_price = exit_px
-        tr.pnl = (tr.exit_price - tr.entry_price) * tr.side * tr.size
-        self.portfolio.cash += tr.pnl - commission
-        self.closed_trades.append(tr)
-        self.portfolio.record_trade(bar.ts, symbol, exit_px, tr.size, -tr.side, tag="exit")
+
+        # Convert lot to a closed Trade record
+        trade = Trade(
+            entry_bar=lot.entry_bar, side=lot.side, size=lot.size,
+            entry_price=lot.entry_price, stop_price=lot.stop_price,
+            take_profit=lot.take_profit, symbol=symbol or lot.symbol,
+            limit_price=None, bars_held=lot.bars_held,
+            exit_price=exit_px, exit_ts=bar.ts,
+            pnl=(exit_px - lot.entry_price) * lot.side * lot.size,
+            metadata=lot.metadata,
+        )
+        self.portfolio.cash += trade.pnl - commission
+        self.closed_trades.append(trade)
+
+    def close_lot_at_price(self, lot: Lot, price: float, symbol: str, ts) -> None:
+        """Close a lot at a given price without requiring a Bar object.
+
+        Used by the tick engine for inline stop/TP execution.
+        """
+        synthetic_bar = Bar.at_price(ts, price)
+        self._close_lot(lot, price, symbol, synthetic_bar)
+
+    def check_stop_tp_tick(self, symbol: str, tick_price: float, ts) -> None:
+        """Check all lots for stop/TP triggers at tick-level granularity.
+
+        Used by the tick engine instead of inlining stop/TP logic.
+        Each lot is checked individually; triggered lots are closed and removed.
+        """
+        if symbol not in self.positions:
+            return
+        position = self.positions[symbol]
+        still_open = []
+        for lot in position:
+            stop_triggered = False
+            tp_triggered = False
+
+            if lot.side > 0:
+                if tick_price <= lot.stop_price:
+                    stop_triggered = True
+                elif lot.take_profit is not None and tick_price >= lot.take_profit:
+                    tp_triggered = True
+            else:
+                if tick_price >= lot.stop_price:
+                    stop_triggered = True
+                elif lot.take_profit is not None and tick_price <= lot.take_profit:
+                    tp_triggered = True
+
+            if stop_triggered or tp_triggered:
+                self.close_lot_at_price(lot, tick_price, symbol, ts)
+            else:
+                still_open.append(lot)
+        position.lots = still_open

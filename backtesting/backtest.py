@@ -20,7 +20,7 @@ import pandas as pd
 from backtesting.data import validate_ohlc
 from backtesting.portfolio import Portfolio
 from backtesting.types import BacktestConfig, Bar, Trade
-from utils import infer_freq_per_year
+from backtesting.utils import infer_freq_per_year
 
 
 class Backtester:
@@ -70,19 +70,18 @@ class Backtester:
         self.symbol = symbol
 
         # Portfolio owns the Broker; together they handle execution and tracking
-        self.portfolio = Portfolio(
-            cash=starting_cash,
-            commission_bps=commission_bps,
-            slippage_bps=slippage_bps,
-            max_leverage=max_leverage,
-            margin_rate=margin_rate,
-            typical_daily_volume=config.typical_daily_volume if config else None,
-            impact_scaling=config.impact_scaling if config else 0.5,
-            daily_volatility=config.daily_volatility if config else None,
-            funding_rate_annual=config.funding_rate_annual if config else 0.0,
-            funding_rate_short=config.funding_rate_short if config else 0.0,
-        )
+        if config is not None:
+            self.portfolio = Portfolio(**config.to_kwargs())
+        else:
+            self.portfolio = Portfolio(
+                cash=starting_cash,
+                commission_bps=commission_bps,
+                slippage_bps=slippage_bps,
+                max_leverage=max_leverage,
+                margin_rate=margin_rate,
+            )
         self.broker = self.portfolio.broker
+        strategy._broker = self.broker
 
         # Validate data before proceeding
         report = validate_ohlc(df)
@@ -101,6 +100,20 @@ class Backtester:
         # Infer annualization factor from the data's actual frequency
         self.freq_per_year = infer_freq_per_year(self._ts)
         self._bar_hours = 24.0 * 365.0 / self.freq_per_year if self.freq_per_year > 0 else 1.0
+
+        # Precompute per-bar elapsed hours from actual timestamp deltas.
+        # This replaces the constant _bar_hours for funding accrual, so
+        # weekend/holiday gaps accrue the correct amount of funding.
+        if self.n > 1:
+            deltas = np.array([
+                (self._ts[i] - self._ts[i - 1]).total_seconds() / 3600.0
+                for i in range(1, self.n)
+            ], dtype=np.float64)
+            self._bar_deltas_hours = np.empty(self.n, dtype=np.float64)
+            self._bar_deltas_hours[0] = self._bar_hours
+            self._bar_deltas_hours[1:] = deltas
+        else:
+            self._bar_deltas_hours = np.array([self._bar_hours], dtype=np.float64)
 
         # Auto-compute daily volatility from data if ADV is set but vol is not
         if self.portfolio.typical_daily_volume is not None and self.portfolio.daily_volatility is None:
@@ -214,7 +227,7 @@ class Backtester:
 
             # Accrue funding costs before computing equity
             if has_positions:
-                portfolio.accrue_funding(self._bar_hours)
+                portfolio.accrue_funding(self._bar_deltas_hours[i])
                 cash = portfolio.cash
 
             if has_positions:
@@ -232,37 +245,24 @@ class Backtester:
             if new_trade is not None and new_trade.size > 0:
                 pending_trade = new_trade
 
-            # Update drawdown tracking (inlined from Portfolio.update for speed)
-            peak_equity = max(peak_equity, equity)
-            if peak_equity > 0:
-                dd = (peak_equity - equity) / peak_equity
-                if dd > max_drawdown:
-                    max_drawdown = dd
+            # Update drawdown tracking
+            portfolio.update_drawdown(equity)
 
             # Margin call check (only when positions exist and margin is configured)
             if has_positions and has_margin:
-                gross = 0.0
-                for tr in open_pos:
-                    gross += abs(close_i * tr.size)
-                if gross > 0:
-                    margin_req = gross * portfolio.margin_rate
-                    if equity < 0.5 * margin_req:
-                        current_prices = {symbol: close_i}
-                        portfolio.update(ts[i], current_prices)
-                        cash = portfolio.cash
-                        equity = cash
+                if portfolio.check_margin_call(equity, {symbol: close_i}, ts[i]):
+                    cash = portfolio.cash
+                    equity = cash
 
             # Write equity to pre-allocated array
-            equity_curve[i] = equity if equity > 0 else 0.0
+            equity_curve[i] = equity
 
-        # Sync final state back to portfolio
-        portfolio.peak_equity = peak_equity
-        portfolio.max_drawdown = max_drawdown
+        # Sync final state back to portfolio (already up to date from update_drawdown calls)
 
         # Expose final state for external access
         self.cash = portfolio.cash
         self.positions = broker.positions.get(symbol, [])
         self.trades = broker.closed_trades
-        self.max_drawdown = max_drawdown
+        self.max_drawdown = portfolio.max_drawdown
 
         return equity_curve, broker.closed_trades

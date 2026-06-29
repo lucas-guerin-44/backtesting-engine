@@ -107,30 +107,22 @@ class TickBacktester:
         latency_broker: Optional[LatencyAwareBroker] = None,
     ):
         if config is not None:
-            starting_cash = config.starting_cash
-            commission_bps = config.commission_bps
-            slippage_bps = config.slippage_bps
-            max_leverage = config.max_leverage
-            margin_rate = config.margin_rate
+            self.portfolio = Portfolio(**config.to_kwargs())
+        else:
+            self.portfolio = Portfolio(
+                cash=starting_cash,
+                commission_bps=commission_bps,
+                slippage_bps=slippage_bps,
+                max_leverage=max_leverage,
+                margin_rate=margin_rate,
+            )
+        self.broker = self.portfolio.broker
+        strategy._broker = self.broker
 
         self.ticks = ticks
         self.strategy = strategy
         self.symbol = symbol
         self.starting_cash = starting_cash
-
-        self.portfolio = Portfolio(
-            cash=starting_cash,
-            commission_bps=commission_bps,
-            slippage_bps=slippage_bps,
-            max_leverage=max_leverage,
-            margin_rate=margin_rate,
-            typical_daily_volume=config.typical_daily_volume if config else None,
-            impact_scaling=config.impact_scaling if config else 0.5,
-            daily_volatility=config.daily_volatility if config else None,
-            funding_rate_annual=config.funding_rate_annual if config else 0.0,
-            funding_rate_short=config.funding_rate_short if config else 0.0,
-        )
-        self.broker = self.portfolio.broker
 
         self.aggregator = TickAggregator(timeframe)
         self.latency_broker = latency_broker
@@ -276,58 +268,10 @@ class TickBacktester:
                     for tr in open_pos:
                         manage_pos_tick(tick_obj, tr)
 
-                # Inlined stop/TP check
-                still_open = None
-                for tr_idx in range(len(open_pos) - 1, -1, -1):
-                    tr = open_pos[tr_idx]
-                    stop_triggered = False
-                    tp_triggered = False
-
-                    if tr.side > 0:
-                        if price <= tr.stop_price:
-                            stop_triggered = True
-                        elif tr.take_profit is not None and price >= tr.take_profit:
-                            tp_triggered = True
-                    else:
-                        if price >= tr.stop_price:
-                            stop_triggered = True
-                        elif tr.take_profit is not None and price <= tr.take_profit:
-                            tp_triggered = True
-
-                    if stop_triggered:
-                        # Close at tick price (stop) with impact-aware slippage
-                        exit_slip = portfolio.impact_slippage_bps(tr.size)
-                        exit_px = price * (1 - tr.side * exit_slip / 1e4)
-                        notional = abs(exit_px * tr.size)
-                        commission = notional * (comm_bps / 1e4)
-                        tr.exit_price = exit_px
-                        tr.pnl = (exit_px - tr.entry_price) * tr.side * tr.size
-                        portfolio.cash += tr.pnl - commission
-                        broker.closed_trades.append(tr)
-                        portfolio.record_trade(timestamps[t_idx], symbol, exit_px, tr.size, -tr.side, tag="exit")
-                        if still_open is None:
-                            still_open = list(open_pos)
-                        still_open.remove(tr)
-                    elif tp_triggered:
-                        # Close at TP price with impact-aware slippage
-                        tp_price = tr.take_profit
-                        exit_slip = portfolio.impact_slippage_bps(tr.size)
-                        exit_px = tp_price * (1 - tr.side * exit_slip / 1e4)
-                        notional = abs(exit_px * tr.size)
-                        commission = notional * (comm_bps / 1e4)
-                        tr.exit_price = exit_px
-                        tr.pnl = (exit_px - tr.entry_price) * tr.side * tr.size
-                        portfolio.cash += tr.pnl - commission
-                        broker.closed_trades.append(tr)
-                        portfolio.record_trade(timestamps[t_idx], symbol, exit_px, tr.size, -tr.side, tag="exit")
-                        if still_open is None:
-                            still_open = list(open_pos)
-                        still_open.remove(tr)
-
-                if still_open is not None:
-                    positions[symbol] = still_open
-                    open_pos = still_open
-                    has_positions = len(open_pos) > 0
+                # Check stops/TPs at tick granularity via broker
+                broker.check_stop_tp_tick(symbol, price, timestamps[t_idx])
+                open_pos = positions.get(symbol)
+                has_positions = open_pos is not None and len(open_pos) > 0
 
             # --- Process latency queue (fill matured orders) ---
             if latency_broker is not None:
@@ -392,28 +336,16 @@ class TickBacktester:
                     elif not isinstance(tick_trade, Order) and tick_trade.size > 0:
                         pending_tick_trade = tick_trade
 
-            # --- Drawdown tracking (inlined, no function call) ---
-            if equity > peak_equity:
-                peak_equity = equity
-            if peak_equity > 0:
-                dd = (peak_equity - equity) / peak_equity
-                if dd > max_drawdown:
-                    max_drawdown = dd
+            # --- Drawdown tracking ---
+            portfolio.update_drawdown(equity)
 
             # --- Margin call check ---
             if has_positions and has_margin:
-                gross = 0.0
-                for tr in open_pos:
-                    gross += abs(price * tr.size)
-                if gross > 0:
-                    margin_req = gross * margin_rate
-                    if equity < 0.5 * margin_req:
-                        current_prices = {symbol: price}
-                        portfolio.update(timestamps[t_idx], current_prices)
-                        cash = portfolio.cash
-                        equity = cash
+                if portfolio.check_margin_call(equity, {symbol: price}, timestamps[t_idx]):
+                    cash = portfolio.cash
+                    equity = cash
 
-            equity_arr[t_idx] = equity if equity > 0 else 0.0
+            equity_arr[t_idx] = equity
 
         # --- Flush the last incomplete bar ---
         last_bar = agg.flush()
@@ -432,58 +364,16 @@ class TickBacktester:
         self.bars = completed_bars
         self.cash = portfolio.cash
         self.positions = broker.positions.get(symbol, [])
-        self.max_drawdown = max_drawdown
+        self.max_drawdown = portfolio.max_drawdown
 
         return equity_arr, broker.closed_trades
 
     def _fill_at_tick_fast(self, trade: Trade, price: float, ts) -> None:
-        """Fill a pending trade at tick price. Inlined broker logic."""
-        side = trade.side
-        size = trade.size
-        symbol = self.symbol
-        portfolio = self.portfolio
-        broker = self.broker
-
-        if size <= 0:
-            return
-
-        # Buying power check
-        equity = portfolio.cash  # Approximate (no open pnl for speed)
-        gross = 0.0
-        for pos_list in broker.positions.values():
-            for tr in pos_list:
-                gross += abs(price * tr.size)
-        limit = equity * portfolio.max_leverage
-        remaining = max(0.0, limit - gross)
-        notional = abs(price * size)
-        if notional > remaining:
-            size = remaining / price if price > 0 else 0.0
-            notional = abs(price * size)
-        if size <= 0:
-            return
-
-        # Commission
-        commission = notional * (portfolio.commission_bps / 1e4)
-        if portfolio.cash < commission:
-            return
-
-        # Slippage (impact-aware)
-        total_slip = portfolio.impact_slippage_bps(size)
-        entry_px = price * (1 + side * total_slip / 1e4)
-
-        # Margin check
-        projected_gross = gross + notional
-        projected_margin = projected_gross * portfolio.margin_rate
-        if equity < projected_margin:
-            return
-
-        new_trade = Trade(
-            entry_bar=Bar(ts, price, price, price, price),
-            side=side, size=size, entry_price=entry_px,
-            stop_price=trade.stop_price, take_profit=trade.take_profit,
+        """Fill a pending trade at tick price using broker.open_trade."""
+        bar = Bar.at_price(ts, price)
+        self.broker.open_trade(
+            symbol=self.symbol, bar=bar,
+            side=trade.side, size=trade.size,
+            stop=trade.stop_price, take_profit=trade.take_profit,
+            entry_price=price,
         )
-        new_trade.bars_held = 0
-        broker.positions.setdefault(symbol, []).append(new_trade)
-        portfolio.cash -= commission
-        portfolio.trade_count += 1
-        portfolio.record_trade(ts, symbol, entry_px, size, side, tag="entry")

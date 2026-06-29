@@ -1,6 +1,5 @@
 """FastAPI backend for running backtests via HTTP."""
 
-import hashlib
 import json
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -51,13 +50,6 @@ class TimeframesResponse(BaseModel):
 class ParamSpaceResponse(BaseModel):
     strategy: str
     params: Dict[str, Dict[str, Any]]
-
-
-def hash_params(params: dict) -> str:
-    """Generate a deterministic hash for a parameter set (useful for caching)."""
-    m = hashlib.sha256()
-    m.update(json.dumps(params, sort_keys=True).encode())
-    return m.hexdigest()
 
 
 @app.get("/instruments", response_model=InstrumentsResponse)

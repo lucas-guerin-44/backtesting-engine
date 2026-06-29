@@ -1,7 +1,6 @@
 """Streamlit dashboard for interactive backtesting."""
 
 import ast
-import inspect
 import os
 from datetime import datetime
 
@@ -12,19 +11,8 @@ import streamlit as st
 
 from backtesting.backtest import Backtester
 from config import DATALAKE_URL
-from strategy_registry import STRATEGY_REGISTRY
+from strategy_registry import STRATEGY_REGISTRY, get_strategy_param_space
 from utils import fetch_ohlc
-
-
-def get_strategy_params(strategy_cls):
-    """Extract parameter names and defaults from a strategy's __init__."""
-    sig = inspect.signature(strategy_cls.__init__)
-    params = {}
-    for name, param in sig.parameters.items():
-        if name == "self" or param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
-            continue
-        params[name] = param.default
-    return params
 
 
 def render_params_form(defaults: dict, strategy_name: str):
@@ -125,7 +113,7 @@ def main():
 
     strategy_name = st.sidebar.selectbox("Strategy", list(STRATEGY_REGISTRY.keys()))
     strategy_cls = STRATEGY_REGISTRY[strategy_name]
-    default_params = get_strategy_params(strategy_cls)
+    default_params = {k: v["default"] for k, v in get_strategy_param_space(strategy_cls).items()}
     params = render_params_form(default_params, strategy_name=strategy_name)
 
     instruments = get_instruments()

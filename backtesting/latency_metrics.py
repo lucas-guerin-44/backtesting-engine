@@ -297,6 +297,7 @@ def compare_latency_impact(
             slippage_bps=slippage_bps,
             max_leverage=max_leverage,
             margin_rate=0.0,
+            margin_call_threshold=0.5,
         )
         engine = None
         if order_book is not None:

@@ -34,6 +34,7 @@ class MeanReversionStrategy(Strategy):
         cooldown_bars: int = 5,
         trend_filter_period: int = 0,
     ):
+        super().__init__()
         self.rsi_oversold = rsi_oversold
         self.rsi_overbought = rsi_overbought
         self.atr_stop_mult = atr_stop_mult
@@ -45,20 +46,17 @@ class MeanReversionStrategy(Strategy):
         self._rsi = RSI(rsi_period)
         self._atr = ATR(atr_period)
         self._trend_filter = TrendFilter(trend_filter_period)
-        self._peak_equity = 0.0
-        self._bars_since_trade = 999
 
     def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Trade]:
         bb_lower, bb_mid, bb_upper = self._bb.update(bar.close)
         rsi_val = self._rsi.update(bar.close)
         atr_val = self._atr.update(bar.high, bar.low, bar.close)
         self._trend_filter.update(bar.close)
-        self._peak_equity = max(self._peak_equity, equity)
-        self._bars_since_trade += 1
+        self._update_tracking(equity)
 
         if bb_lower is None or rsi_val is None or atr_val is None or atr_val <= 0:
             return None
-        if self._bars_since_trade < self.cooldown_bars:
+        if not self._can_trade():
             return None
 
         # Long: lower band + oversold
@@ -69,10 +67,7 @@ class MeanReversionStrategy(Strategy):
             stop = entry - atr_val * self.atr_stop_mult
             size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
                                       self._peak_equity, self.max_dd_halt)
-            if size > 0:
-                self._bars_since_trade = 0
-                return Trade(entry_bar=bar, side=1, size=size,
-                             entry_price=entry, stop_price=stop, take_profit=bb_mid)
+            return self._make_trade(bar, 1, entry, stop, bb_mid, size)
 
         # Short: upper band + overbought
         if bar.high >= bb_upper and rsi_val >= self.rsi_overbought:
@@ -82,9 +77,6 @@ class MeanReversionStrategy(Strategy):
             stop = entry + atr_val * self.atr_stop_mult
             size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
                                       self._peak_equity, self.max_dd_halt)
-            if size > 0:
-                self._bars_since_trade = 0
-                return Trade(entry_bar=bar, side=-1, size=size,
-                             entry_price=entry, stop_price=stop, take_profit=bb_mid)
+            return self._make_trade(bar, -1, entry, stop, bb_mid, size)
 
         return None

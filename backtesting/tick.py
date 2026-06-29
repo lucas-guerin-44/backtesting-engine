@@ -236,15 +236,6 @@ class TickAggregator:
         else:
             self._bar_end_ns = bar_ns
 
-    def _update_bar(self, tick: Tick) -> None:
-        if tick.price > self._high:
-            self._high = tick.price
-        if tick.price < self._low:
-            self._low = tick.price
-        self._close = tick.price
-        self._volume += tick.volume
-        self._tick_count += 1
-
     def aggregate_batch(self, ticks: List[Tick]) -> List[Bar]:
         """Aggregate a list of ticks into completed bars (vectorized fast path).
 
