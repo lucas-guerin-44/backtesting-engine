@@ -5,22 +5,22 @@ why the abstractions exist, what problems each layer solves, and where each laye
 still falls short. It is not about trading strategy or quant methodology. For that,
 see `research.md`.
 
-## Scope: streamlined `main` vs experimental branch
+## Scope: canonical `main` vs experimental branch
 
 `main` carries the **canonical** bar-level engines — the event-driven `Backtester`
 (single symbol) and `PortfolioBacktester` (shared-account, multi-instrument) — plus
 the pure-Python `VectorizedBacktester` used as an optimizer/screening fast path.
 
-Sections 5–9 below describe the **experimental execution-realism stack** (tick
-engine, `LatencyAwareBroker`, FIFO order book, stochastic latency models, and the
-Cython tick core). That stack does not depend on and is not depended on by the
-canonical engines; it lives on the **`experimental/tick-cython`** branch. The tick
-Cython core (`_tick_core.*`) is not built on `main`.
+The **experimental execution-realism stack** — tick engine (`tick.py`,
+`tick_backtest.py`), `LatencyAwareBroker`, FIFO order book (`order_book.py`),
+stochastic latency models (`latency_models.py`), and the Cython tick core
+(`_tick_core.*`) — lives on the **`experimental/tick-cython`** branch. That stack
+does not depend on and is not depended on by the canonical engines, and it is not
+built or imported on `main`.
 
 The vectorized core `_core.*` is kept on `main`: it accelerates the canonical
 indicator kernels (EMA/ATR/RSI) as well as the vectorized trade-chaining loop, and
-degrades to pure Python when not compiled (e.g. on Linux/CI, where only a
-Windows `.pyd` was previously shipped).
+degrades to pure Python when not compiled.
 
 ---
 
@@ -98,7 +98,7 @@ would be at the open (95), 300 bps worse than expected.
 The `Broker.close_due_to_stop()` implementation handles this explicitly:
 
 ```python
-# broker.py:153-166
+# broker.py
 if tr.side > 0:
     if bar.open <= tr.stop_price:
         exit_raw = bar.open       # gapped through stop, fill at open
@@ -141,7 +141,7 @@ This is a portfolio-level constraint, not a per-trade one. A new trade must
 check what all existing trades together already consume:
 
 ```python
-# broker.py:37-41
+# broker.py
 def _remaining_buying_power(self, current_prices):
     equity = self.portfolio.compute_equity(current_prices)
     gross = self.portfolio.gross_notional(current_prices)
@@ -185,7 +185,7 @@ when you want:
 The `Trade` dataclass carries all of this:
 
 ```python
-# types.py:35-45
+# types.py
 @dataclass
 class Trade:
     entry_bar: Bar
@@ -200,283 +200,38 @@ class Trade:
 ```
 
 A trade is created at entry and mutated at exit. The broker maintains
-`positions: Dict[str, List[Trade]]`, a list per symbol, not a scalar. This
-handles the multi-trade case correctly and makes per-trade statistics
-(average hold time, win rate, average winner vs loser) trivial to compute
-after the fact.
+`positions: Dict[str, Position]`, a `Position` per symbol that holds one or more
+lots, not a scalar. This handles the multi-trade case correctly and makes
+per-trade statistics (average hold time, win rate, average winner vs loser)
+trivial to compute after the fact.
 
 ---
 
-## 5. Tick-Level Backtesting (experimental branch): The Bar Granularity Problem
+## 5. Experimental Execution-Realism Stack (separate branch)
 
-Even with a correct bar-level backtester, OHLC bars lose information.
+`main` deliberately stops at the bar-level event engine. Three additional
+questions are real but out of scope here, and are answered on the
+**`experimental/tick-cython`** branch:
 
-Consider a bar where `low=95, high=105, stop=98, take_profit=103`. Both the
-stop and the take-profit are inside the bar's range. Which one fired? The OHLC
-representation can't tell you, you only know the bar's low and high, not the
-order in which those extremes were reached.
+- **Intra-bar ambiguity.** OHLC bars cannot tell you whether a stop or a
+  take-profit fired first when both sit inside the same bar's range. A tick
+  engine resolves this by processing real price updates in order
+  (`tick.py`, `tick_backtest.py`).
+- **Order lifecycle.** A signal does not become a fill instantly: exchange
+  acknowledgment and matching-engine queue time add latency, and limit/stop
+  orders need conditional execution (`latency_broker.py`, `order_book.py`).
+- **Latency as a distribution.** A single constant understates the tail;
+  `latency_models.py` adds fixed, Gaussian, log-normal, and component models.
 
-The standard bar-level approach assumes a fixed priority (usually stop before
-TP on down moves) and documents that assumption. It's an approximation.
-
-**The tick backtester eliminates this ambiguity.** Each tick is a real price
-update. The stop and TP are checked against every single tick price, so the
-order they fire is determined by the actual sequence of price updates. There is
-no ambiguity about which triggered first because you process them chronologically.
-
-The tick-level approach also changes **fill timing semantics**. At the bar level,
-a signal fires and fills at the next bar's open, a delay of one bar (minutes to
-days, depending on timeframe). At the tick level, a signal fires at tick N and
-fills at tick N+1, a delay measured in milliseconds. This is closer to how
-live execution actually works.
-
-### Implementation note: pre-extracting tick arrays
-
-The hot loop in `TickBacktester.run()` processes tens of thousands of ticks.
-Every attribute lookup in a Python loop has overhead. The tick backtester
-pre-extracts prices and timestamps into numpy arrays at init:
-
-```python
-# tick_backtest.py:137-140
-self._prices = np.array([t.price for t in ticks], dtype=np.float64)
-self._timestamps = [t.ts for t in ticks]
-self._bar_boundaries = np.array(
-    [t.ts.floor(freq).value for t in ticks], dtype=np.int64
-)
-```
-
-Bar boundary detection in the hot loop becomes an integer comparison
-(`tick_boundary != current_bar_boundary`) rather than a floor() call per tick.
-This is approximately 50x faster per tick for known timeframes.
-
-The `TickAggregator` similarly uses integer nanosecond arithmetic instead of
-pandas `Timestamp.floor()`:
-
-```python
-# tick.py:131-133
-if self._freq_ns is not None:
-    ns = ts.value
-    floored_ns = (ns // self._freq_ns) * self._freq_ns
-```
-
-These are not premature optimizations, the difference between a 30-second
-backtest and a 3-second one determines whether iterative strategy development
-is practical.
+That stack is self-contained: it does not import the canonical bar engines'
+private internals, and the canonical engines do not import it. It also carries
+its own Cython core (`_tick_core.*`) and its own test suite, none of which are
+built or collected on `main`. See the branch for those modules, tests,
+examples, and benchmarks.
 
 ---
 
-## 6. What the Tick Backtester Still Gets Wrong (experimental branch)
-
-Even with tick-level data, the `Broker` fills orders with two assumptions that
-don't hold in practice:
-
-**Assumption 1: Instant acknowledgment.**
-A strategy signal at tick N fills at tick N+1. There is no model of the time
-between submission and exchange acknowledgment. In reality, even a co-located
-server has a round-trip latency of microseconds to milliseconds; a remote server
-has tens of milliseconds. During that window, the price moves. The fill you get
-is not the price you saw when you decided to trade.
-
-**Assumption 2: Orders are market orders with no order type.**
-The original broker has no concept of limit orders, stop orders, or any
-conditional execution. Every entry is "fill me at approximately the current
-price, adjusted for slippage bps." A strategy that wants to buy on a breakout
-at exactly 102.50 cannot express that, it can only say "buy now, at whatever
-the next tick's price is."
-
-**Assumption 3: Flat slippage regardless of spread.**
-The broker applies `slippage_bps` symmetrically to every fill. It doesn't
-distinguish between buying (where you pay the ask) and selling (where you
-receive the bid). On instruments with a real bid/ask spread, this understates
-slippage for trades that cross the spread and overstates it for others.
-
----
-
-## 7. The LatencyAwareBroker: Modeling Order Lifecycle (experimental branch)
-
-The `LatencyAwareBroker` wraps the existing `Broker` and adds two things the
-original broker cannot express: **time** between submission and fill, and
-**order types** with conditional execution.
-
-### Order lifecycle
-
-An order submitted at time T with `ack_latency_ns=10ms` and `fill_latency_ns=5ms`
-is not eligible to fill until `T + 15ms`. Every tick processed before that
-timestamp is scanned and skipped. This models the round-trip to the exchange
-(ack) and the queue time at the matching engine (fill).
-
-```python
-# latency_broker.py:98-100
-def submit(self, order: Order, ts: pd.Timestamp) -> None:
-    fill_after_ns = ts.value + self.ack_latency_ns + self.fill_latency_ns
-    self._pending.append(PendingOrder(order=order, fill_after_ns=fill_after_ns))
-```
-
-The queue is processed on every tick via `process_tick()`, which the
-`TickBacktester` calls before the strategy signal block. Orders that haven't
-matured stay in the queue. Orders that have matured are matched against the
-current tick's price.
-
-### Order types
-
-**MARKET:** Fill at `tick.ask` (buy) or `tick.bid` (sell). When bid/ask are
-present in the tick data (as they are in the datalake), this correctly prices
-the spread. A buy order costs more than a sell order returns, by exactly the
-spread, without needing to specify slippage bps.
-
-**LIMIT:** Fill only if the relevant side of the market has crossed the limit
-level. A limit buy at 100 does not fill if the ask is 101. It stays in the
-queue until the ask drops to 100, at which point it fills at the limit price,
-getting price improvement relative to a market order.
-
-**STOP:** Inert until price crosses the `stop_trigger`. Once triggered, it
-converts to a market order and fills on the next eligible tick. This separates
-the activation event from the fill event, which matters when the trigger happens
-in the middle of a fast-moving price sequence.
-
-### Drop-in interface
-
-`LatencyAwareBroker` exposes `positions` and `closed_trades` as pass-throughs
-to the inner broker. Strategy code and the tick backtester's stop/TP logic
-read these directly, they don't need to know whether they're talking to a
-`Broker` or a `LatencyAwareBroker`. The latency layer is opt-in: passing
-`latency_broker=None` to `TickBacktester` (the default) preserves the original
-behavior exactly.
-
-### What the latency layer still doesn't model
-
-- **Market impact.** Large orders move the price. A market order for 10,000
-  units doesn't fill entirely at the best ask, it sweeps through multiple price
-  levels, with each additional unit getting a worse price. The latency layer
-  treats every order as price-taking regardless of size.
-
----
-
-## 8. The Order Book: Queue Position and Partial Fills (experimental branch)
-
-The simple latency broker fills a limit order the moment the market-side price
-crosses the limit level, for the full requested quantity. This misses two things
-that matter at tick frequency: **your position in the queue relative to other
-resting orders**, and **limited liquidity at a single price level**.
-
-### FIFO queue priority
-
-`PriceLevel` is a FIFO deque of `(order_id, qty_remaining)` pairs at a single
-price. When the matching engine sees that the best ask has crossed a resting bid
-level, it drains the level front-to-back:
-
-```python
-# order_book.py
-def consume(self, available_qty: float) -> List[Tuple[str, float]]:
-    while self._orders and remaining > 0:
-        order_id, qty = self._orders[0]
-        fill_qty = min(qty, remaining)
-        ...
-        if fill_qty >= qty:
-            self._orders.popleft()     # fully consumed
-        else:
-            self._orders[0] = (order_id, qty - fill_qty)  # partial, stays front
-            break
-```
-
-The first order submitted gets the first fill. A later order at the same price
-waits until all earlier orders are fully filled. This is how real exchange
-matching engines work.
-
-### Partial fills via max_qty_per_level
-
-`MatchingEngine` accepts `max_qty_per_level: float`. On each tick, at most
-this many units fill per price level. Set it to `float('inf')` (the default)
-for a perfectly deep market. Set it to a small value to model thin books where
-large orders fill across multiple ticks.
-
-There is no Level 2 data in the tick feed, so `max_qty_per_level` is a
-configurable assumption, not derived from observed depth. This is the same
-honesty problem as `slippage_bps`, it is a made-up number that should be
-calibrated to the instrument and time period. The default is `inf` because a
-false precision assumption is worse than an explicit infinite-depth one.
-
-### Resting orders after partial fills
-
-When `MatchingEngine.submit()` returns a partial fill, the unfilled remainder
-is automatically placed in the book at the same limit price. It will drain on
-future ticks as more liquidity arrives at that level:
-
-```python
-# order_book.py
-fill_qty = min(order.qty, self.max_qty_per_level)
-remainder = order.qty - fill_qty
-if remainder > 1e-9:
-    self.book.add_resting_bid(order.order_id, order.limit_price, remainder)
-return [Fill(order_id=order.order_id, price=ask, qty=fill_qty, ts=ts)]
-```
-
-`LatencyAwareBroker` tracks these in `_resting: Dict[str, Tuple[Order, float]]`
-and calls `broker.open_trade()` on each partial fill as it arrives.
-
----
-
-## 9. Latency Models: From Fixed to Stochastic (experimental branch)
-
-The original latency layer used a single constant: `ack_latency_ns`. Every order
-waited exactly that many nanoseconds before becoming eligible to fill. This is
-deterministic and easy to reason about, but it doesn't reflect how network
-latency actually behaves.
-
-Real round-trip latency is a distribution. Most fills happen near the mean; a
-small fraction take much longer (garbage collection pause, network congestion,
-exchange queue backlog). A constant model can't capture the tail, and the tail
-is where strategies that depend on tight timing get hurt.
-
-The `LatencyModel` ABC provides a `sample_ns() -> int` interface. Passing a
-model to `LatencyAwareBroker` replaces the fixed delay with a per-order sample:
-
-```python
-if self._latency_model is not None:
-    delay_ns = self._latency_model.sample_ns()
-else:
-    delay_ns = self.ack_latency_ns + self.fill_latency_ns
-```
-
-### Available models
-
-**`FixedLatency(total_us)`**, the original behavior, no randomness. Use this
-when you want deterministic, reproducible results and aren't studying latency
-sensitivity.
-
-**`GaussianLatency(mean_us, std_us)`**, symmetric jitter around a mean. Values
-below zero are floored at zero. Reasonable first upgrade: easy to reason about,
-and `std_us` directly represents "how much does my latency vary?".
-
-**`LogNormalLatency(median_us, sigma)`**, right-skewed. Parameterised by the
-median (50th percentile) rather than the mean, because the mean of a log-normal
-is pulled upward by the tail. A higher `sigma` gives a heavier tail. Closer to
-empirical network latency distributions, where most samples cluster near the
-median but occasional spikes reach 5-10x the typical value.
-
-**`ComponentLatency(network_out, queue, processing, network_in)`**, sums four
-independently sampled legs. Useful for decomposing where latency budget is
-spent: co-located servers might have 50us each for network legs but 500us for
-exchange queue time. Each leg is itself a `LatencyModel`, so you can mix fixed
-and stochastic components.
-
-### Why the default stays None
-
-Stochastic latency means each backtest run produces a different equity curve.
-That is appropriate when studying latency sensitivity, but it breaks the basic
-assumption that a backtest is reproducible. The default `latency_model=None`
-falls back to `ack_latency_ns + fill_latency_ns`, which is constant and
-reproducible. Opt in to stochastic latency deliberately, with a fixed RNG seed
-if you want reproducibility:
-
-```python
-import numpy as np
-model = GaussianLatency(mean_us=500, std_us=100, rng=np.random.default_rng(42))
-```
-
----
-
-## 10. Design Decisions in Retrospect
+## 6. Design Decisions in Retrospect
 
 **Event-driven vs vectorized:** The bar event-driven loop (`Backtester`) and
 vectorized engine (`vectorized.py`) both generate signals from a completed bar
@@ -494,19 +249,11 @@ portfolio accounting, no trailing stops, and no partial fills or order-book /
 limit-order mechanics. It is a screening/optimizer fast path, not an execution
 model.
 
-**`_fill_at_tick_fast()` as inlined broker logic:** The tick backtester's hot
-loop does not call `broker.open_trade()` for fills. It inlines the equivalent
-logic directly in the loop body. This is a deliberate performance trade-off: the
-method call + dictionary lookup overhead on every tick was measurable (~15% of
-loop time). The cost is that the fast-fill logic is duplicated from the broker.
-Tests in `test_cross_engine.py` catch any divergence between the two paths.
-
-**Strategies return `Trade | Order`:** The original strategy interface returns
-a `Trade` object, a fully specified position with entry price, stop, and size
-already calculated. This design keeps strategies simple: they compute what they
-want, and the backtester handles the rest. The latency extension adds `Order` as
-an alternative return type. Returning an `Order` routes the signal through the
-latency queue; returning a `Trade` uses the original instant-fill path. Both are
-valid and both are tested. Existing strategies require no changes.
+**Strategies return a `Trade`:** The strategy interface returns a `Trade`
+object, a fully specified position with entry price, stop, and size already
+calculated. This design keeps strategies simple: they compute what they want,
+and the backtester handles the rest. Execution-realism extensions that would
+return order objects live on the experimental branch and are not part of the
+canonical interface.
 
 **Run manifests:** The research layer owns experiment manifests; the engine should expose resolved run inputs and data identity for reproducibility.

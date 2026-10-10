@@ -30,7 +30,7 @@ from backtesting.backtest import Backtester
 from backtesting.plot import plot_strategy_comparison
 from backtesting.vectorized import VectorizedBacktester
 from backtesting.vectorized_signals import trend_following_signals
-from optimizer import optimize, walk_forward
+from optimizer import optimize
 from strategies import (
     DonchianBreakoutStrategy,
     MeanReversionStrategy,

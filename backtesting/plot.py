@@ -15,7 +15,7 @@ Example::
     plot_portfolio({"Equal Weight": result_ew, "Risk Parity": result_rp})
 """
 
-from typing import List, Optional
+from typing import Optional
 
 import numpy as np
 

@@ -1,7 +1,7 @@
 """Core data types for the backtesting engine."""
 
-from dataclasses import dataclass, field
-from typing import List, Optional, Union
+from dataclasses import dataclass
+from typing import List, Optional
 
 import pandas as pd
 

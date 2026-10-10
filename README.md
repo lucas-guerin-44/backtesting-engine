@@ -91,8 +91,9 @@ backtesting/
     broker.py            Gap-aware stops, slippage, commission
     portfolio.py         Equity, drawdown, margin calls, funding accrual
     statistics.py        Sharpe, bootstrap CI, Deflated Sharpe Ratio
-    optimizer.py         Optuna TPE + walk-forward validation
     indicators.py        EMA/ATR/RSI kernels (optional Cython `_core` accel)
+
+optimizer.py             Optuna TPE + walk-forward validation
 ```
 
 **Bar-level flow:** stop exits → TP exits → strategy signal → entry at next bar open → portfolio update. When both stop and TP fire in the same bar, stops execute first (conservative default).
@@ -116,9 +117,10 @@ Supported:
 
 **Not supported** (use the canonical engines for these): funding/swap, market
 impact, contract multipliers, multi-asset/portfolio accounting, trailing stops,
-partial fills, latency, and order-book/limit-order mechanics. Trade direction and
-counts broadly agree with the canonical engine, but they are not intended to
-match trade-for-trade — see `tests/test_cross_engine.py`.
+and partial fills. Latency and order-book/limit-order mechanics are not part of
+`main` at all — they live on the `experimental/tick-cython` branch. Trade
+direction and counts broadly agree with the canonical engine, but they are not
+intended to match trade-for-trade — see `tests/test_cross_engine.py`.
 
 ## Strategies
 
@@ -180,5 +182,5 @@ python -m pytest tests/ -x -q
 
 - Session filtering is at the data layer (`load_data()` in `utils.py`), not in the engine itself.
 - No corporate action adjustments (splits, dividends) — use adjusted data.
-- Intra-bar execution realism (tick fills, latency, order book, partial fills) is on `main`'s experimental branch and is not part of the canonical bar-level engines.
+- Intra-bar execution realism (tick fills, latency, order book) is not part of `main`; it lives on the `experimental/tick-cython` branch. Partial fills are likewise not modeled by the canonical bar-level engines.
 - The vectorized engine is a screening fast path, not a full execution model (see above).

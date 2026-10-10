@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Optional
 
-from backtesting.types import Bar, Lot, Position, Trade
+from backtesting.types import Bar, Position, Trade
 
 if TYPE_CHECKING:
     from backtesting.broker import Broker

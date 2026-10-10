@@ -13,8 +13,6 @@ Two APIs:
 import numpy as np
 from typing import Optional
 
-from backtesting.types import Bar
-
 
 # ---------------------------------------------------------------------------
 # Incremental indicators (O(1) per bar, zero allocations)

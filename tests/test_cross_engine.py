@@ -13,8 +13,8 @@ management differ. We verify:
 Intentional model differences (do not expect identical results):
 - ``VectorizedBacktester`` supports only one sequential position at a time,
   while the event engine tracks per-lot stop/TP levels and can scale in.
-- Funding/swap, margin calls, and market impact are event- and tick-engine
-  features; the vectorized engine applies a flat commission and slippage only.
+- Funding/swap, margin calls, and market impact are event-engine features;
+  the vectorized engine applies a flat commission and slippage only.
 - The vectorized engine sizes each trade by ``risk_per_trade``; event-driven
   strategies size explicitly in ``on_bar``.
 These are simulation differences, not bugs. Cross-engine tests assert the

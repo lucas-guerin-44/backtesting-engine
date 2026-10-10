@@ -12,7 +12,7 @@ Overfitting, and Non-Normality."
 """
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
 import numpy as np
 from scipy import stats

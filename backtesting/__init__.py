@@ -15,6 +15,7 @@ from backtesting.portfolio import Portfolio
 from backtesting.portfolio_backtest import PortfolioBacktester, PortfolioRiskLimits
 from backtesting.strategy import Strategy
 from backtesting.types import Bar, Trade
+from backtesting.vectorized import VectorizedBacktester
 from backtesting.statistics import (
     StatisticalReport,
     compute_sharpe,
@@ -28,6 +29,7 @@ __all__ = [
     "Backtester",
     "PortfolioBacktester",
     "PortfolioRiskLimits",
+    "VectorizedBacktester",
     "InstrumentSpec",
     "Broker",
     "Portfolio",

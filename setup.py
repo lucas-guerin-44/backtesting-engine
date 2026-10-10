@@ -1,4 +1,8 @@
-"""Build Cython extensions for the backtesting engine.
+"""Cython extension build hook.
+
+Package metadata, dependencies, and package discovery live in
+``pyproject.toml``. This file exists only to compile the optional
+``backtesting._core`` extension.
 
 Usage:
     pip install cython numpy
@@ -6,9 +10,7 @@ Usage:
 
 The Cython extension is optional — the engine falls back to pure Python
 if the compiled module is not available. ``_core`` accelerates the canonical
-indicator kernels (EMA/ATR/RSI) and the vectorized trade-chaining loop. The
-experimental tick core (``_tick_core``) lives on the ``experimental/tick-cython``
-branch.
+indicator kernels (EMA/ATR/RSI) and the vectorized trade-chaining loop.
 """
 
 from setuptools import setup, Extension
@@ -32,8 +34,4 @@ except ImportError:
     extensions = []
     print("Cython not found — skipping C extension build.")
 
-setup(
-    name="backtesting-engine",
-    ext_modules=extensions,
-    packages=[],  # Don't auto-discover — we only need the C extension
-)
+setup(ext_modules=extensions)

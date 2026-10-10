@@ -10,8 +10,6 @@ Provides the trade execution layer for the Backtester with:
 
 from typing import Dict, List, Optional
 
-import pandas as pd
-
 from backtesting.types import Bar, Lot, Position, Trade
 
 
@@ -246,42 +244,3 @@ class Broker:
         # P&L less only exit commission here; the trade record is net of both.
         self.portfolio.cash += gross_pnl - commission
         self.closed_trades.append(trade)
-
-    def close_lot_at_price(self, lot: Lot, price: float, symbol: str, ts) -> None:
-        """Close a lot at a given price without requiring a Bar object.
-
-        Used by the tick engine for inline stop/TP execution.
-        """
-        synthetic_bar = Bar.at_price(ts, price)
-        self._close_lot(lot, price, symbol, synthetic_bar)
-
-    def check_stop_tp_tick(self, symbol: str, tick_price: float, ts) -> None:
-        """Check all lots for stop/TP triggers at tick-level granularity.
-
-        Used by the tick engine instead of inlining stop/TP logic.
-        Each lot is checked individually; triggered lots are closed and removed.
-        """
-        if symbol not in self.positions:
-            return
-        position = self.positions[symbol]
-        still_open = []
-        for lot in position:
-            stop_triggered = False
-            tp_triggered = False
-
-            if lot.side > 0:
-                if tick_price <= lot.stop_price:
-                    stop_triggered = True
-                elif lot.take_profit is not None and tick_price >= lot.take_profit:
-                    tp_triggered = True
-            else:
-                if tick_price >= lot.stop_price:
-                    stop_triggered = True
-                elif lot.take_profit is not None and tick_price <= lot.take_profit:
-                    tp_triggered = True
-
-            if stop_triggered or tp_triggered:
-                self.close_lot_at_price(lot, tick_price, symbol, ts)
-            else:
-                still_open.append(lot)
-        position.lots = still_open
