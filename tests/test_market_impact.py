@@ -129,6 +129,7 @@ class TestBacktestWithImpact:
             starting_cash=10_000,
             slippage_bps=1.0,
             typical_daily_volume=500_000,
+            daily_volatility=120.0,
             impact_scaling=0.5,
         )
         bt = Backtester(
@@ -138,6 +139,18 @@ class TestBacktestWithImpact:
         equity, trades = bt.run()
         assert len(trades) > 0
         assert equity[-1] > 0
+
+    def test_backtest_does_not_estimate_impact_volatility_from_future_bars(self, trending_df):
+        config = BacktestConfig(
+            starting_cash=10_000,
+            typical_daily_volume=500_000,
+        )
+        bt = Backtester(trending_df, NeverTradeStrategy(), config=config)
+
+        # Impact volatility must be supplied from an explicitly chosen
+        # calibration period; estimating it from the complete test frame leaks
+        # future observations into earlier fills.
+        assert bt.portfolio.daily_volatility is None
 
     def test_impact_increases_cost_vs_no_impact(self, trending_df):
         bt_no_impact = Backtester(

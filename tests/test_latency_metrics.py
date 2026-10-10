@@ -14,6 +14,7 @@ from backtesting.latency_metrics import (
     compare_latency_impact,
 )
 from backtesting.order import Order, OrderType
+from backtesting.statistics import compute_sharpe
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +177,15 @@ def test_sharpe_finite_with_curve():
     stats = LatencyStats(records=[], equity_curve=curve)
     assert math.isfinite(stats.sharpe)
     assert stats.sharpe > 0
+
+
+def test_sharpe_uses_configured_annualization_periods():
+    import numpy as np
+    curve = np.linspace(10_000, 12_000, 300)
+    stats = LatencyStats(records=[], equity_curve=curve, freq_per_year=365)
+    assert stats.sharpe == pytest.approx(
+        compute_sharpe(curve, freq_per_year=365),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -455,3 +465,15 @@ def test_compare_latency_impact_sharpe_impact_is_float():
     )
 
     assert isinstance(result.sharpe_impact, float)
+
+
+def test_compare_latency_impact_accepts_explicit_annualization():
+    ticks = _make_ticks(n=60)
+    result = compare_latency_impact(
+        ticks=ticks,
+        strategy_factory=_build_strategy_factory(),
+        symbol="TEST",
+        freq_per_year=365,
+    )
+    assert result.zero_latency.freq_per_year == 365
+    assert result.with_latency.freq_per_year == 365

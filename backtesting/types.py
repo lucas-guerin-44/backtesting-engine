@@ -79,6 +79,7 @@ class Lot:
     take_profit: float
     symbol: Optional[str] = None
     bars_held: int = 0
+    entry_commission: float = 0.0
     metadata: Optional[dict] = None
 
 

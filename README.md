@@ -16,7 +16,7 @@ Most backtesters optimize for speed or ease of use. This one optimizes for **not
 
 - **No lookahead bias.** Signals fire on bar close, fills happen at next bar's open (or next tick). The engine never sees the future.
 - **Execution realism.** Gap-aware stops fill at the open when price gaps through — not at the stop level. Stochastic latency models delay fills by configurable time. The FIFO order book handles partial fills and queue position.
-- **Costs you can measure.** Spread modeled from MT5 M1 data, not guessed. Market impact scales with `sigma * sqrt(Q/ADV)`. Funding/swap accrual per bar. Commission on entry and exit.
+- **Explicit costs.** Commission and spread/slippage are configurable. Optional market impact scales with `sigma * sqrt(Q/ADV)` when ADV and daily volatility are supplied. Funding/swap accrues over elapsed bar time.
 - **Statistical honesty.** Walk-forward validation, Deflated Sharpe Ratio (corrects for multiple testing), bootstrap confidence intervals, permutation tests. The optimizer doesn't just find params — it tells you if they're real.
 
 ## Quick start
@@ -42,6 +42,35 @@ bt = Backtester(df, MomentumStrategy(trend_filter_period=200), config=config, sy
 equity_curve, trades = bt.run()
 ```
 
+## Multi-asset portfolio backtests
+
+`PortfolioBacktester` runs one strategy per symbol against a shared cash, leverage, margin, and drawdown account. Symbols with different bar calendars are merged as an event stream; a symbol without a new bar is marked at its last close. Simultaneous eligible entries are scaled pro rata against shared buying power and optional portfolio risk limits. Per-symbol `max_stale_hours` can flag or reject marks from old bars (`stale_mark_policy="warn"` by default; use `"error"` to fail closed).
+
+```python
+from backtesting.portfolio_backtest import PortfolioBacktester, PortfolioRiskLimits
+from backtesting.instruments import InstrumentSpec
+
+bt = PortfolioBacktester(
+    data={"ASSET_A": asset_a_df, "ASSET_B": asset_b_df},
+    strategies={"ASSET_A": strategy_a, "ASSET_B": strategy_b},
+    config=BacktestConfig(starting_cash=100_000, commission_bps=2.0),
+    account_currency="USD",
+    instrument_specs={
+        "ASSET_A": InstrumentSpec(contract_multiplier=1.0),
+        "ASSET_B": InstrumentSpec(contract_multiplier=10.0, max_stale_hours=36),
+    },
+    risk_limits=PortfolioRiskLimits(
+        max_total_risk_fraction=0.06,
+        max_symbol_gross_leverage=1.0,
+    ),
+)
+equity_curve, trades = bt.run(liquidate_at_end=True)
+```
+
+An `InstrumentSpec` is required for every symbol so contract assumptions are explicit. Contract multipliers affect P&L, notional, commission, margin, impact sizing, and built-in strategy risk sizing. All instruments must be quoted in the account currency; FX conversion and portfolio optimization across symbols are not supported by this runner yet.
+
+Benchmark the portfolio event loop with `python benchmarks/bench_portfolio.py --bars 50000 --symbols 4 --runs 3`.
+
 ## Architecture
 
 ```
@@ -49,6 +78,7 @@ strategies/              4 included (trend, reversion, momentum, donchian)
     ↓ on_bar()
 backtesting/
     backtest.py          Event-driven engine (~300k bars/sec)
+    portfolio_backtest.py Shared-account multi-instrument event engine
     tick_backtest.py     Tick-level engine (~2.4M ticks/sec)
     vectorized.py        Numpy engine (~700k bars/sec)
     ↓
@@ -62,6 +92,8 @@ backtesting/
 ```
 
 **Bar-level flow:** stop exits → TP exits → strategy signal → entry at next bar open → portfolio update. When both stop and TP fire in the same bar, stops execute first (conservative default).
+
+The vectorized engine uses the same signal-close / next-bar-open entry timing. A signal on the final bar has no later open and is not filled.
 
 **Tick-level flow:** stop/TP check at exact tick price → fill at next tick → aggregate into bar → `on_bar()` fires. No gap logic needed — ticks are the atomic price updates.
 
@@ -101,11 +133,16 @@ result = optimize(MomentumStrategy, param_space={"lookback": (5, 40)},
 
 wf = walk_forward(MomentumStrategy, param_space, df, n_splits=3, n_trials=200)
 print(wf.degradation)  # IS - OOS: near-zero = real edge, large = overfitting
+print(wf.oos_sharpe, wf.oos_total_return_pct)  # stitched chronological OOS result
 ```
+
+Pass `seed=...` to `optimize()` or `walk_forward()` for reproducible trials (`n_jobs=1`).
+Annualization is estimated from observed bars per elapsed calendar year; pass `freq_per_year=...` to `Backtester`, `optimize()`, or `walk_forward()` to select a market-calendar convention, especially for short or irregular samples.
+Walk-forward OOS folds warm incremental strategy state from prior training bars; built-in strategies choose a warm-up horizon, while custom strategies can override `warmup_bar()` and `warmup_bars`.
 
 ## Tests
 
-337 tests, ~4s. Cross-engine consistency checks (event-driven = vectorized), walk-forward contamination regression, indicator edge cases.
+379 tests, ~4s. Cross-engine consistency checks, walk-forward contamination regression, indicator edge cases, and multi-asset portfolio execution.
 
 ```bash
 python -m pytest tests/ -x -q

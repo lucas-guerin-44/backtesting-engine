@@ -299,6 +299,37 @@ class TestTickBacktester:
         # either hits TP or remains open
         assert len(bt.broker.closed_trades) + len(bt.positions) >= 1
 
+    def test_tick_run_preserves_computed_max_drawdown(self):
+        """The final backtester result retains drawdown accumulated during the run."""
+        class _HoldLong(Strategy):
+            def __init__(self):
+                super().__init__()
+                self.entered = False
+
+            def on_bar(self, i, bar, equity):
+                return None
+
+            def on_tick(self, tick, current_bar, equity):
+                if self.entered:
+                    return None
+                self.entered = True
+                return Trade(
+                    entry_bar=Bar(tick.ts, tick.price, tick.price, tick.price, tick.price),
+                    side=1, size=10.0, entry_price=tick.price,
+                    stop_price=50.0, take_profit=None,
+                )
+
+        ticks = _make_ticks([100.0, 100.0, 120.0, 80.0])
+        bt = TickBacktester(
+            ticks, _HoldLong(),
+            timeframe="1min", starting_cash=10_000,
+        )
+
+        bt.run()
+
+        # Enter 10 units at 100, mark up to 10,200, then down to 9,800.
+        assert bt.max_drawdown == pytest.approx((10_200.0 - 9_800.0) / 10_200.0)
+
     def test_stop_loss_at_tick_price(self):
         """Stop triggers at exact tick price, not bar boundary."""
         ticks = [
@@ -403,3 +434,88 @@ class TestTickBacktester:
         # Entry should be around 105 (the next tick after bar completion),
         # not 100 (the bar's close). Slippage may shift it slightly.
         assert all_trades[0].entry_price == pytest.approx(105.0, rel=0.01)
+
+
+class TestTickFunding:
+    def test_funding_accrues_on_elapsed_calendar_time(self):
+        """Funding uses actual tick timestamps, not a fixed timeframe."""
+
+        class _EnterOnceOnTick(Strategy):
+            def __init__(self):
+                super().__init__()
+                self.entered = False
+
+            def on_bar(self, i, bar, equity):
+                return None
+
+            def on_tick(self, tick, current_bar, equity):
+                if self.entered:
+                    return None
+                self.entered = True
+                return Trade(
+                    entry_bar=Bar(
+                        tick.ts, tick.price, tick.price, tick.price, tick.price,
+                    ),
+                    side=1, size=1.0, entry_price=tick.price,
+                    stop_price=1.0, take_profit=None,
+                )
+
+        ticks = [
+            Tick(ts=pd.Timestamp("2024-01-01 00:00:00"), price=100.0),
+            # Entry fills here at 100 (next tick after the signal).
+            Tick(ts=pd.Timestamp("2024-01-01 00:01:00"), price=100.0),
+            # One full day later: one day of funding is charged.
+            Tick(ts=pd.Timestamp("2024-01-02 00:01:00"), price=100.0),
+        ]
+        config = BacktestConfig(starting_cash=10_000, funding_rate_annual=36_500.0)
+        bt = TickBacktester(
+            ticks, _EnterOnceOnTick(), timeframe="1min", config=config,
+        )
+
+        equity, _ = bt.run()
+
+        # 1 unit at 100 for 1 day at 36,500% p.a. = 100 of funding.
+        assert equity[-1] == pytest.approx(9_900.0)
+
+
+class TestTickSingleUse:
+    def test_tick_backtester_rejects_rerun(self, uptrend_ticks):
+        bt = TickBacktester(
+            uptrend_ticks, _AlwaysBuyOnBar(), timeframe="1min", starting_cash=10_000,
+        )
+        bt.run()
+        with pytest.raises(RuntimeError, match="single-use"):
+            bt.run()
+
+
+class TestTickContractMultiplier:
+    def test_multiplier_scales_mark_to_market_equity(self):
+        ticks = [
+            Tick(ts=pd.Timestamp("2024-01-01 09:00:00"), price=100.0),
+            Tick(ts=pd.Timestamp("2024-01-01 09:00:30"), price=100.0),
+            Tick(ts=pd.Timestamp("2024-01-01 09:01:00"), price=110.0),
+            Tick(ts=pd.Timestamp("2024-01-01 09:01:30"), price=110.0),
+            Tick(ts=pd.Timestamp("2024-01-01 09:02:00"), price=120.0),
+            Tick(ts=pd.Timestamp("2024-01-01 09:02:30"), price=120.0),
+        ]
+
+        class _EnterOnce(Strategy):
+            def __init__(self):
+                super().__init__()
+                self.entered = False
+
+            def on_bar(self, i, bar, equity):
+                if self.entered:
+                    return None
+                self.entered = True
+                return Trade(bar, 1, 2.0, bar.close, 1.0, None)
+
+        bt = TickBacktester(
+            ticks, _EnterOnce(), timeframe="1min", starting_cash=10_000,
+            contract_multipliers={"default": 10},
+        )
+        equity, _ = bt.run()
+
+        # Entry fills at 110 (tick after bar 0 completes); marked at 120.
+        # size 2 * multiplier 10 => +200 of unrealized P&L.
+        assert equity[4] == pytest.approx(10_000 + (120.0 - 110.0) * 2 * 10)

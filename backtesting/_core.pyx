@@ -87,12 +87,12 @@ def chain_trades(
     cdef int n = len(close_arr)
     cdef int bar = 0
     cdef int bars_since_trade = cooldown_bars
-    cdef int side_val, exit_idx
+    cdef int side_val, exit_idx, entry_idx
     cdef double cash = starting_cash
     cdef double peak_equity = starting_cash
     cdef double stop, tp, dd, dd_scale, risk_per_unit
     cdef double entry_price, size, entry_comm, exit_price, exit_price_adj
-    cdef double pnl, exit_comm, net_pnl
+    cdef double pnl, exit_comm, net_pnl, trade_net_pnl
 
     # Typed memoryviews for C-speed array access
     cdef double[:] o_v = open_arr
@@ -121,6 +121,11 @@ def chain_trades(
         stop = stops_v[bar]
         tp = tps_v[bar]
 
+        # Close-based signals execute at the next bar's open.
+        entry_idx = bar + 1
+        if entry_idx >= n:
+            break
+
         if isnan(stop) or isnan(tp) or side_val == 0:
             bar += 1
             continue
@@ -135,12 +140,12 @@ def chain_trades(
         dd_scale = 1.0 - dd / max_dd_halt
         if dd_scale < 0.0:
             dd_scale = 0.0
-        risk_per_unit = fabs(c_v[bar] - stop)
+        risk_per_unit = fabs(o_v[entry_idx] - stop)
         if risk_per_unit <= 0:
             bar += 1
             continue
 
-        entry_price = c_v[bar] * (1.0 + side_val * slip_factor)
+        entry_price = o_v[entry_idx] * (1.0 + side_val * slip_factor)
         size = (cash * risk_per_trade * dd_scale) / risk_per_unit
         if entry_price > 0 and size > cash / entry_price:
             size = cash / entry_price
@@ -157,7 +162,7 @@ def chain_trades(
         cash -= entry_comm
 
         # Find exit
-        exit_idx, exit_price = _find_exit(bar, side_val, stop, tp, o_v, h_v, lo_v, c_v, n)
+        exit_idx, exit_price = _find_exit(entry_idx, side_val, stop, tp, o_v, h_v, lo_v, c_v, n)
 
         # Slippage on exit
         exit_price_adj = exit_price * (1.0 - side_val * slip_factor)
@@ -167,11 +172,12 @@ def chain_trades(
         exit_comm = fabs(exit_price_adj * size * comm_factor)
         net_pnl = pnl - exit_comm
         cash += net_pnl
+        trade_net_pnl = net_pnl - entry_comm
 
         if cash > peak_equity:
             peak_equity = cash
 
-        trades.append((bar, exit_idx, side_val, size, entry_price, exit_price_adj, net_pnl))
+        trades.append((entry_idx, exit_idx, side_val, size, entry_price, exit_price_adj, trade_net_pnl))
 
         bars_since_trade = 0
         bar = exit_idx + 1

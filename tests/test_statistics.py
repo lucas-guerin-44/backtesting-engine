@@ -12,6 +12,7 @@ from backtesting.statistics import (
     permutation_test,
     deflated_sharpe_ratio,
     compute_statistical_report,
+    compute_stats,
 )
 
 
@@ -63,10 +64,28 @@ class TestBootstrapSharpeCI:
         ci = bootstrap_sharpe_ci(eq, seed=42)
         assert isinstance(ci, SharpeCI)
 
+    def test_sharpe_is_defined_for_short_curves(self):
+        from backtesting.statistics import compute_sharpe
+        assert compute_sharpe(np.array([100.0, 101.0])) == 0.0
+        assert compute_sharpe(np.array([100.0, 101.0, 102.0]), freq_per_year=0) == 0.0
+
     def test_str_readable(self):
         ci = bootstrap_sharpe_ci(make_trending_equity(), seed=42)
         s = str(ci)
         assert "Sharpe" in s
+
+
+def test_cagr_uses_return_intervals_not_equity_observations():
+    stats = compute_stats([100.0, 110.0], [], freq_per_year=1)
+    assert stats["cagr"] == pytest.approx(10.0)
+
+
+def test_compute_stats_preserves_terminal_insolvency():
+    stats = compute_stats([100.0, 10.0, 0.0, 0.0], [], freq_per_year=252)
+
+    assert stats["total_return_pct"] == pytest.approx(-100.0)
+    assert stats["max_drawdown"] == pytest.approx(100.0)
+    assert stats["cagr"] == pytest.approx(-100.0)
 
 
 class TestPermutationTest:
@@ -114,6 +133,17 @@ class TestPermutationTest:
         r2 = permutation_test(eq, trades, seed=42)
         assert r1.p_value == r2.p_value
 
+    def test_trade_pnl_does_not_change_bar_return_test(self):
+        eq = make_trending_equity()
+
+        class FakeTrade:
+            def __init__(self, pnl):
+                self.pnl = pnl
+
+        positive = permutation_test(eq, [FakeTrade(10.0)] * 10, seed=123)
+        negative = permutation_test(eq, [FakeTrade(-10_000.0)] * 10, seed=123)
+        assert positive.p_value == negative.p_value
+
 
 class TestDeflatedSharpe:
     def test_single_trial_no_deflation(self):
@@ -145,6 +175,20 @@ class TestDeflatedSharpe:
             all_trial_sharpes=sharpes)
         assert isinstance(result, DeflatedSharpeResult)
 
+    def test_annualization_does_not_change_dsr_significance(self):
+        per_period = deflated_sharpe_ratio(
+            observed_sharpe=0.1, n_trials=100, n_observations=252,
+            freq_per_year=1,
+        )
+        annualized = deflated_sharpe_ratio(
+            observed_sharpe=0.1 * np.sqrt(252), n_trials=100,
+            n_observations=252, freq_per_year=252,
+        )
+        assert annualized.p_value == pytest.approx(per_period.p_value)
+        assert annualized.deflated_sharpe == pytest.approx(
+            per_period.deflated_sharpe * np.sqrt(252),
+        )
+
 
 class TestStatisticalReport:
     def test_full_report(self):
@@ -172,3 +216,64 @@ class TestStatisticalReport:
         s = str(report)
         assert "Statistical" in s
         assert "Bootstrap" in s
+
+    def test_n_trials_tested_is_required(self):
+        eq = make_trending_equity()
+        with pytest.raises(TypeError):
+            compute_statistical_report(eq, [])
+
+    def test_n_trials_tested_must_be_positive(self):
+        eq = make_trending_equity()
+        with pytest.raises(ValueError, match="positive integer"):
+            compute_statistical_report(eq, [], n_trials_tested=0)
+
+    def test_dsr_uses_non_normal_skew_and_kurtosis(self):
+        rng = np.random.RandomState(7)
+        returns = rng.exponential(0.004, 1500) - 0.004 + 0.0006
+        equity = 10_000 * np.cumprod(1.0 + returns)
+
+        report = compute_statistical_report(
+            equity, [], n_trials_tested=100, returns=returns, seed=11,
+        )
+        assert report.deflated_sharpe is not None
+        # Exponential returns are right-skewed and fat-tailed, not normal.
+        assert report.skewness != pytest.approx(0.0, abs=0.05)
+        assert report.kurtosis != pytest.approx(3.0, abs=0.05)
+
+        manual = deflated_sharpe_ratio(
+            observed_sharpe=report.deflated_sharpe.observed_sharpe,
+            n_trials=100,
+            n_observations=len(equity) - 1,
+            skewness=report.skewness,
+            kurtosis=report.kurtosis,
+            freq_per_year=252,
+        )
+        assert report.deflated_sharpe.p_value == pytest.approx(manual.p_value)
+
+        # Assuming normality would have produced a different deflation.
+        normal = deflated_sharpe_ratio(
+            observed_sharpe=report.deflated_sharpe.observed_sharpe,
+            n_trials=100,
+            n_observations=len(equity) - 1,
+            skewness=0.0,
+            kurtosis=3.0,
+            freq_per_year=252,
+        )
+        assert report.deflated_sharpe.deflated_sharpe != pytest.approx(
+            normal.deflated_sharpe, abs=1e-6,
+        )
+
+    def test_passes_statistical_gate_rejects_flat_curve(self):
+        from backtesting.statistics import passes_statistical_gate
+
+        eq = make_flat_equity()
+        report = compute_statistical_report(eq, [], n_trials_tested=50, seed=42)
+        assert passes_statistical_gate(report) is False
+        assert passes_statistical_gate(None) is False
+
+    def test_passes_statistical_gate_accepts_strong_curve(self):
+        from backtesting.statistics import passes_statistical_gate
+
+        eq = make_trending_equity()
+        report = compute_statistical_report(eq, [], n_trials_tested=50, seed=42)
+        assert passes_statistical_gate(report) is True

@@ -6,7 +6,7 @@ import pytest
 
 from backtesting.backtest import Backtester
 from backtesting.strategy import Strategy
-from backtesting.types import Bar, Trade
+from backtesting.types import BacktestConfig, Bar, Trade
 
 
 class NeverTradeStrategy(Strategy):
@@ -50,6 +50,16 @@ class BuyOnceStrategy(Strategy):
 
 
 class TestBacktesterBasics:
+    def test_explicit_annualization_override(self, sample_df):
+        bt = Backtester(
+            sample_df, NeverTradeStrategy(), freq_per_year=365,
+        )
+        assert bt.freq_per_year == 365
+
+    def test_nonpositive_annualization_override_rejected(self, sample_df):
+        with pytest.raises(ValueError, match="freq_per_year must be > 0"):
+            Backtester(sample_df, NeverTradeStrategy(), freq_per_year=0)
+
     def test_no_trades_flat_equity(self, flat_df):
         bt = Backtester(flat_df, NeverTradeStrategy(), starting_cash=10_000)
         eq, trades = bt.run()
@@ -95,6 +105,25 @@ class TestTradeExecution:
         assert len(trades) >= 1
         assert trades[0].pnl > 0
 
+    def test_optional_terminal_liquidation_closes_open_position(self):
+        df = pd.DataFrame(
+            {
+                "open": [100.0, 101.0, 102.0],
+                "high": [101.0, 102.0, 103.0],
+                "low": [99.0, 100.0, 101.0],
+                "close": [100.0, 101.0, 102.0],
+            },
+            index=pd.date_range("2024-01-01", periods=3, freq="D"),
+        )
+        bt = Backtester(df, BuyOnceStrategy(stop_pct=0.5, tp_pct=0.5), starting_cash=10_000)
+
+        equity, trades = bt.run(liquidate_at_end=True)
+
+        assert len(trades) == 1
+        assert trades[0].exit_ts == df.index[-1]
+        assert len(bt.positions) == 0
+        assert equity[-1] == pytest.approx(bt.cash)
+
 
 class TestCommissionAndSlippage:
     def test_commission_reduces_equity(self, trending_df):
@@ -115,6 +144,96 @@ class TestCommissionAndSlippage:
         eq_slip, _ = bt_slip.run()
 
         assert eq_slip[-1] < eq_clean[-1]
+
+    def test_closed_trade_pnl_includes_entry_and_exit_commission(self):
+        data = {
+            "open": [100.0, 100.0, 100.0],
+            "high": [101.0, 101.0, 111.0],
+            "low": [99.0, 99.0, 99.0],
+            "close": [100.0, 100.0, 110.0],
+        }
+        df = pd.DataFrame(data, index=pd.date_range("2024-01-01", periods=3, freq="h"))
+
+        class CommissionStrategy(Strategy):
+            def __init__(self):
+                super().__init__()
+                self.entered = False
+
+            def on_bar(self, i, bar, equity):
+                if self.entered:
+                    return None
+                self.entered = True
+                return Trade(bar, 1, 1.0, 100.0, 90.0, 110.0)
+
+        bt = Backtester(
+            df, CommissionStrategy(), commission_bps=100.0, slippage_bps=10.0,
+        )
+        _, trades = bt.run()
+
+        assert len(trades) == 1
+        trade = trades[0]
+        entry_commission = abs(trade.entry_price * trade.size) * 0.01
+        exit_commission = abs(trade.exit_price * trade.size) * 0.01
+        gross_pnl = (trade.exit_price - trade.entry_price) * trade.side * trade.size
+        assert trade.pnl == pytest.approx(
+            gross_pnl - entry_commission - exit_commission,
+        )
+        assert trades[0].pnl == pytest.approx(bt.cash - bt.starting_cash)
+
+
+class TestExecutionTimeMarks:
+    def test_buying_power_uses_open_not_the_unavailable_close(self):
+        data = {
+            "open": [100.0, 100.0, 100.0],
+            "high": [101.0, 101.0, 200.0],
+            "low": [99.0, 99.0, 50.0],
+            "close": [100.0, 100.0, 50.0],
+        }
+        df = pd.DataFrame(data, index=pd.date_range("2024-01-01", periods=3, freq="D"))
+
+        class TwoEntries(Strategy):
+            def on_bar(self, i, bar, equity):
+                if i == 0:
+                    return Trade(bar, 1, 1.0, bar.close, 1.0, 1_000.0)
+                if i == 1:
+                    return Trade(bar, 1, 20.0, bar.close, 1.0, 1_000.0)
+                return None
+
+        bt = Backtester(
+            df, TwoEntries(), starting_cash=1_000, max_leverage=1.5,
+        )
+        bt.run()
+
+        # At the second fill, the open is 100. With the first lot marked at
+        # that executable price, available notional is 1,400. The bar's later
+        # close of 50 must not influence the fill size.
+        assert bt.broker.positions["default"][1].size == pytest.approx(14.0)
+
+
+class TestFundingTiming:
+    def test_new_open_position_is_not_charged_for_prior_interval(self):
+        df = pd.DataFrame(
+            {
+                "open": [100.0, 100.0, 100.0],
+                "high": [101.0, 101.0, 101.0],
+                "low": [99.0, 99.0, 99.0],
+                "close": [100.0, 100.0, 100.0],
+            },
+            index=pd.date_range("2024-01-01", periods=3, freq="D"),
+        )
+        config = BacktestConfig(
+            starting_cash=10_000,
+            funding_rate_annual=36_500.0,
+        )
+
+        bt = Backtester(
+            df, BuyOnceStrategy(size_pct=0.01), config=config,
+        )
+        equity, _ = bt.run()
+
+        # One unit at 100 is held only from day 1's open to day 2's open:
+        # exactly one day of funding at 36,500% annualized is 100.
+        assert equity[-1] == pytest.approx(9_900.0)
 
 
 class TestGapAwareStops:
@@ -182,6 +301,48 @@ class TestGapAwareStops:
         # Should fill at the stop price (95.0), not the open (98.0)
         assert abs(trades[0].exit_price - 95.0) < 0.1
 
+    @pytest.mark.parametrize(
+        ("priority", "expected_exit", "limit_price"),
+        [
+            ("stop_first", 95.0, None),
+            ("tp_first", 105.0, None),
+            ("stop_first", 95.0, 100.0),
+        ],
+    )
+    def test_entry_bar_stop_and_target_are_checked(
+        self, priority, expected_exit, limit_price,
+    ):
+        """A position filled at the open is exposed to the rest of that bar."""
+        data = {
+            "open": [100.0, 100.0, 100.0],
+            "high": [101.0, 106.0, 101.0],
+            "low": [99.0, 94.0, 99.0],
+            "close": [100.0, 100.0, 100.0],
+        }
+        df = pd.DataFrame(data, index=pd.date_range("2024-01-01", periods=3, freq="h"))
+
+        class EntryBarExitStrategy(Strategy):
+            def __init__(self):
+                super().__init__()
+                self.entered = False
+
+            def on_bar(self, i, bar, equity):
+                if self.entered:
+                    return None
+                self.entered = True
+                return Trade(
+                    bar, 1, 1.0, 100.0, 95.0, 105.0,
+                    limit_price=limit_price,
+                )
+
+        _, trades = Backtester(df, EntryBarExitStrategy()).run(
+            execution_priority=priority,
+        )
+
+        assert len(trades) == 1
+        assert trades[0].exit_ts == df.index[1]
+        assert trades[0].exit_price == pytest.approx(expected_exit)
+
 
 class TestExecutionPriority:
     def test_stop_first_is_default(self, sample_df):
@@ -196,6 +357,40 @@ class TestExecutionPriority:
             bt.run(execution_priority="invalid")
 
 
+class TestTrailingStopTiming:
+    def test_close_based_stop_update_is_not_checked_against_same_bar(self):
+        data = {
+            "open": [100.0, 100.0, 100.0, 100.0],
+            "high": [101.0, 110.0, 103.0, 102.0],
+            "low": [99.0, 99.0, 100.0, 99.0],
+            "close": [100.0, 105.0, 101.0, 100.0],
+        }
+        df = pd.DataFrame(data, index=pd.date_range("2024-01-01", periods=4, freq="h"))
+
+        class TrailStrategy(Strategy):
+            def __init__(self):
+                super().__init__()
+                self.entered = False
+
+            def on_bar(self, i, bar, equity):
+                if not self.entered:
+                    self.entered = True
+                    return Trade(bar, 1, 1.0, 100.0, 90.0, 120.0)
+                return None
+
+            def manage_position(self, bar, trade):
+                trade.stop_price = 104.0
+
+        _, trades = Backtester(df, TrailStrategy(), starting_cash=10_000).run()
+
+        # The new 104 stop is set after bar 2 has been checked, so its low of
+        # 100 must not retrospectively stop out the position. It is active on
+        # bar 3, where the open gaps through it.
+        assert len(trades) == 1
+        assert trades[0].exit_ts == df.index[3]
+        assert trades[0].exit_price == 100.0
+
+
 class TestDrawdownTracking:
     def test_max_drawdown_with_no_trades(self, flat_df):
         bt = Backtester(flat_df, NeverTradeStrategy(), starting_cash=10_000)
@@ -207,3 +402,95 @@ class TestDrawdownTracking:
         bt.run()
         # With a reversal in the data, there should be some drawdown
         assert bt.max_drawdown >= 0.0
+
+
+class TestLimitPriceImprovement:
+    def test_buy_limit_fills_at_open_when_gapped_through(self):
+        data = {
+            "open": [100.0, 98.0, 98.0],
+            "high": [101.0, 99.0, 99.0],
+            "low": [99.0, 97.0, 97.0],
+            "close": [100.0, 98.0, 98.0],
+        }
+        df = pd.DataFrame(data, index=pd.date_range("2024-01-01", periods=3, freq="D"))
+
+        class LimitBuy(Strategy):
+            def __init__(self):
+                super().__init__()
+                self.entered = False
+
+            def on_bar(self, i, bar, equity):
+                if self.entered:
+                    return None
+                self.entered = True
+                return Trade(bar, 1, 1.0, 100.0, 10.0, 1_000.0, limit_price=100.0)
+
+        _, trades = Backtester(df, LimitBuy()).run(liquidate_at_end=True)
+
+        # Bar 1 opens at 98, through the 100 buy limit, so the fill receives
+        # price improvement at the open rather than the limit price.
+        assert len(trades) == 1
+        assert trades[0].entry_price == pytest.approx(98.0)
+
+
+class TestSingleUse:
+    def test_backtester_rejects_rerun(self, flat_df):
+        bt = Backtester(flat_df, NeverTradeStrategy(), starting_cash=10_000)
+        bt.run()
+        with pytest.raises(RuntimeError, match="single-use"):
+            bt.run()
+
+
+class TestContractMultiplier:
+    def test_multiplier_scales_mark_to_market_equity(self):
+        """Inline equity must scale P&L by the contract multiplier, matching
+        broker/portfolio accounting rather than silently assuming 1.0."""
+        data = {
+            "open": [100.0, 100.0, 100.0, 100.0],
+            "high": [101.0, 101.0, 110.0, 101.0],
+            "low": [99.0, 99.0, 99.0, 99.0],
+            "close": [100.0, 100.0, 105.0, 100.0],
+        }
+        df = pd.DataFrame(data, index=pd.date_range("2024-01-01", periods=4, freq="h"))
+
+        class EnterOnce(Strategy):
+            def __init__(self):
+                super().__init__()
+                self.entered = False
+
+            def on_bar(self, i, bar, equity):
+                if self.entered:
+                    return None
+                self.entered = True
+                return Trade(bar, 1, 2.0, bar.close, 1.0, 1_000.0)
+
+        bt = Backtester(
+            df, EnterOnce(), starting_cash=10_000,
+            contract_multipliers={"default": 10},
+        )
+        equity, _ = bt.run()
+
+        # Filled at bar 1 open (100); marked at bar 2 close (105),
+        # size 2 * multiplier 10 => +100 of unrealized P&L.
+        assert equity[1] == pytest.approx(10_000)
+        assert equity[2] == pytest.approx(10_000 + (105.0 - 100.0) * 2 * 10)
+
+
+class TestTimestampColumn:
+    def test_range_index_with_timestamp_column_is_used(self):
+        """A 'timestamp' column must drive event timing even when the frame
+        has a plain RangeIndex (previously coerced into epoch nanoseconds)."""
+        df = pd.DataFrame({
+            "timestamp": pd.date_range("2024-01-01", periods=3, freq="h"),
+            "open": [100.0, 100.0, 100.0],
+            "high": [101.0, 101.0, 101.0],
+            "low": [99.0, 99.0, 99.0],
+            "close": [100.0, 100.0, 100.0],
+        })
+
+        bt = Backtester(df, NeverTradeStrategy(), starting_cash=10_000)
+        equity, _ = bt.run()
+
+        assert len(equity) == 3
+        assert bt._ts[0] == pd.Timestamp("2024-01-01 00:00:00")
+        assert bt.freq_per_year > 1

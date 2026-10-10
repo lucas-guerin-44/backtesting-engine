@@ -44,6 +44,13 @@ class DonchianBreakoutStrategy(Strategy):
         self._highs: deque = deque(maxlen=channel_period + 1)
         self._lows: deque = deque(maxlen=channel_period + 1)
         self._trend_filter = TrendFilter(trend_filter_period)
+        self.warmup_bars = 5 * max(channel_period, atr_period, trend_filter_period)
+
+    def warmup_bar(self, bar: Bar) -> None:
+        self._highs.append(bar.high)
+        self._lows.append(bar.low)
+        self._atr.update(bar.high, bar.low, bar.close)
+        self._trend_filter.update(bar.close)
 
     def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Trade]:
         self._highs.append(bar.high)
@@ -70,7 +77,8 @@ class DonchianBreakoutStrategy(Strategy):
             stop = entry - atr_val * self.atr_stop_mult
             tp = entry + (entry - stop) * self.risk_reward
             size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
-                                      self._peak_equity, self.max_dd_halt)
+                                      self._peak_equity, self.max_dd_halt,
+                                      self._contract_multiplier)
             return self._make_trade(bar, 1, entry, stop, tp, size)
 
         if bar.close < ch_low:
@@ -80,7 +88,8 @@ class DonchianBreakoutStrategy(Strategy):
             stop = entry + atr_val * self.atr_stop_mult
             tp = entry - (stop - entry) * self.risk_reward
             size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
-                                      self._peak_equity, self.max_dd_halt)
+                                      self._peak_equity, self.max_dd_halt,
+                                      self._contract_multiplier)
             return self._make_trade(bar, -1, entry, stop, tp, size)
 
         return None

@@ -67,6 +67,7 @@ import pandas as pd
 
 from backtesting.statistics import compute_sharpe
 from backtesting.tick import Tick
+from backtesting.utils import infer_freq_per_year
 
 
 @dataclass
@@ -126,10 +127,14 @@ class LatencyStats:
         records: List[FillRecord],
         unfilled_qty: float = 0.0,
         equity_curve: Optional[np.ndarray] = None,
+        freq_per_year: int = 252,
     ) -> None:
         self._records = records
         self._unfilled_qty = unfilled_qty
         self.equity_curve = equity_curve
+        if freq_per_year <= 0:
+            raise ValueError("freq_per_year must be > 0")
+        self.freq_per_year = int(freq_per_year)
 
     @property
     def fill_count(self) -> int:
@@ -178,10 +183,10 @@ class LatencyStats:
     def sharpe(self) -> float:
         if self.equity_curve is None or len(self.equity_curve) < 2:
             return float("nan")
-        # Tick-level equity curve: annualise assuming ~252 trading days,
-        # each with ~86400 ticks if 1-second data; this is approximate.
-        # We keep freq_per_year=252 as a consistent baseline across runs.
-        return compute_sharpe(self.equity_curve, annualize=True, freq_per_year=252)
+        return compute_sharpe(
+            self.equity_curve, annualize=True,
+            freq_per_year=self.freq_per_year,
+        )
 
     def summary(self) -> str:
         return textwrap.dedent(f"""
@@ -250,6 +255,7 @@ def compare_latency_impact(
     symbol: str = "default",
     timeframe: str = "M1",
     order_book=None,
+    freq_per_year: Optional[int] = None,
 ) -> LatencyImpactResult:
     """Run the same strategy twice — zero latency vs configured latency.
 
@@ -284,11 +290,17 @@ def compare_latency_impact(
     order_book : MatchingEngine, optional
         Shared engine config. A fresh OrderBook + MatchingEngine pair is
         constructed for the latency run if this is not None.
+    freq_per_year : int, optional
+        Annualization periods for the bar-level Sharpe comparison. If omitted,
+        estimated from the completed bar timestamps.
     """
     # Deferred import to avoid circular imports at module level
     from backtesting.latency_broker import LatencyAwareBroker
     from backtesting.portfolio import Portfolio
     from backtesting.tick_backtest import TickBacktester
+
+    if freq_per_year is not None and freq_per_year <= 0:
+        raise ValueError("freq_per_year must be > 0")
 
     def _run(ack_ns: int, fill_ns: int, model=None) -> LatencyStats:
         portfolio = Portfolio(
@@ -324,13 +336,18 @@ def compare_latency_impact(
         )
         bt.portfolio = portfolio
         bt.broker = portfolio.broker
-        equity_curve, _ = bt.run()
+        bt.run()
 
         unfilled = sum(qty for _, qty in lb._resting.values())
+        metric_freq = (
+            int(freq_per_year) if freq_per_year is not None
+            else infer_freq_per_year([bar.ts for bar in bt.bars])
+        )
         return LatencyStats(
             records=lb.fill_records,
             unfilled_qty=unfilled,
-            equity_curve=equity_curve,
+            equity_curve=bt.bar_equity_curve,
+            freq_per_year=metric_freq,
         )
 
     zero = _run(0, 0)

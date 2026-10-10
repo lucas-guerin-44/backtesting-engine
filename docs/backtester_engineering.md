@@ -461,13 +461,12 @@ model = GaussianLatency(mean_us=500, std_us=100, rng=np.random.default_rng(42))
 
 ## 10. Design Decisions in Retrospect
 
-**Event-driven vs vectorized:** The engine has both an event-driven loop
-(`Backtester`, `TickBacktester`) and a vectorized engine (`vectorized.py`). The
-event-driven loop is correct by construction, it processes one bar at a time
-with no access to future data, which prevents lookahead by design. The vectorized
-engine is faster but requires careful index alignment to avoid accidentally using
-a future value. Both are tested against each other (`test_cross_engine.py`) to
-verify they produce identical results for the same strategy and data.
+**Event-driven vs vectorized:** The bar event-driven loop (`Backtester`) and
+vectorized engine (`vectorized.py`) both generate signals from a completed bar
+and fill at the next bar's open. The vectorized engine is faster but requires
+careful index alignment to avoid accidentally using future data. They share
+fill timing, but strategy state and position management can still differ; the
+cross-engine tests check broad consistency rather than identical results.
 
 **`_fill_at_tick_fast()` as inlined broker logic:** The tick backtester's hot
 loop does not call `broker.open_trade()` for fills. It inlines the equivalent
@@ -483,3 +482,5 @@ want, and the backtester handles the rest. The latency extension adds `Order` as
 an alternative return type. Returning an `Order` routes the signal through the
 latency queue; returning a `Trade` uses the original instant-fill path. Both are
 valid and both are tested. Existing strategies require no changes.
+
+**Run manifests:** The research layer owns experiment manifests; the engine should expose resolved run inputs and data identity for reproducibility.

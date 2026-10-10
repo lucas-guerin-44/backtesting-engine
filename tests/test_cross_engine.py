@@ -3,15 +3,23 @@
 Verifies that the event-driven (Backtester) and vectorized (VectorizedBacktester)
 engines produce equivalent results on the same data and strategy logic.
 
-The two engines differ by design:
-- Event-driven: next-bar-open execution (pending queue), per-bar callbacks
-- Vectorized: same-bar close execution, array operations
-
-So we don't expect bit-identical results. Instead, we verify:
+Both engines use next-bar-open execution, but strategy state and order
+management differ. We verify:
 1. Trade direction agreement (same entry signals → same sides)
 2. Trade count agreement (same number of trades, or within 1)
 3. Directional equity agreement (both profitable or both losing)
 4. Approximate PnL agreement (within tolerance for execution model differences)
+
+Intentional model differences (do not expect identical results):
+- ``VectorizedBacktester`` supports only one sequential position at a time,
+  while the event engine tracks per-lot stop/TP levels and can scale in.
+- Funding/swap, margin calls, and market impact are event- and tick-engine
+  features; the vectorized engine applies a flat commission and slippage only.
+- The vectorized engine sizes each trade by ``risk_per_trade``; event-driven
+  strategies size explicitly in ``on_bar``.
+These are simulation differences, not bugs. Cross-engine tests assert the
+shared execution contract (signal on close, fill at next open) rather than
+identical trade lists.
 """
 
 import numpy as np
@@ -19,6 +27,8 @@ import pandas as pd
 import pytest
 
 from backtesting.backtest import Backtester
+from backtesting.strategy import Strategy
+from backtesting.types import Trade
 from backtesting.vectorized import VectorizedBacktester
 from backtesting.vectorized_signals import (
     trend_following_signals,
@@ -249,14 +259,47 @@ class TestCrossEngineConsistency:
             {"risk_per_trade": 0.02, "max_dd_halt": 0.15, "cooldown_bars": 10},
         )
 
-        # Allow some difference due to execution model (next-bar-open vs same-bar)
-        # but they should be in the same ballpark
+        # Strategy state differs between engines, but trade counts should be
+        # in the same ballpark under the shared next-open fill convention.
         if len(ev_trades) > 0 and len(vec_trades) > 0:
             ratio = len(vec_trades) / len(ev_trades)
             assert 0.3 < ratio < 3.0, (
                 f"Trade count divergence too large: "
                 f"event={len(ev_trades)}, vec={len(vec_trades)}"
             )
+
+    def test_entry_fills_at_next_bar_open_in_both_engines(self):
+        """The shared execution contract: signal on close, fill at next open."""
+        n = 4
+        o = np.array([100.0, 107.0, 109.0, 108.0])
+        h = np.array([101.0, 108.0, 110.0, 109.0])
+        lo = np.array([99.0, 106.0, 108.0, 107.0])
+        c = np.array([100.0, 107.0, 109.0, 108.0])
+        df = pd.DataFrame(
+            {"open": o, "high": h, "low": lo, "close": c},
+            index=pd.date_range("2020-01-01", periods=n, freq="D"),
+        )
+
+        class EnterFirstBar(Strategy):
+            def on_bar(self, i, bar, equity):
+                if i == 0:
+                    return Trade(bar, 1, 1.0, bar.close, 50.0, 200.0)
+                return None
+
+        _, ev_trades = Backtester(df, EnterFirstBar()).run(liquidate_at_end=True)
+        assert len(ev_trades) == 1
+        assert ev_trades[0].entry_price == pytest.approx(o[1])
+
+        entries = np.array([True, False, False, False])
+        sides = np.array([1, 0, 0, 0])
+        stops = np.array([50.0, np.nan, np.nan, np.nan])
+        tps = np.array([200.0, np.nan, np.nan, np.nan])
+        _, vec_trades = VectorizedBacktester(o, h, lo, c).run(
+            entries, sides, stops, tps, risk_per_trade=0.01,
+        )
+        assert len(vec_trades) == 1
+        assert vec_trades[0].entry_idx == 1
+        assert vec_trades[0].entry_price == pytest.approx(o[1])
 
     def test_commission_affects_both_engines_equally(self, trending_df):
         """Adding commission should reduce equity in both engines."""

@@ -78,6 +78,56 @@ class TestVectorizedBacktester:
         assert trades[0].pnl > 0
         assert eq[-1] > 10_000
 
+    def test_signal_fills_at_next_open(self):
+        o = np.array([100.0, 107.0, 109.0])
+        h = np.array([101.0, 108.0, 110.0])
+        lo = np.array([99.0, 106.0, 108.0])
+        c = np.array([100.0, 107.0, 109.0])
+        entries = np.array([True, False, False])
+        sides = np.array([1, 0, 0])
+        stops = np.array([90.0, np.nan, np.nan])
+        tps = np.array([120.0, np.nan, np.nan])
+
+        _, trades = VectorizedBacktester(o, h, lo, c).run(
+            entries, sides, stops, tps, risk_per_trade=0.01,
+        )
+
+        assert len(trades) == 1
+        assert trades[0].entry_idx == 1
+        assert trades[0].entry_price == 107.0
+
+    def test_last_bar_signal_does_not_fill(self):
+        o = np.array([100.0, 101.0])
+        h = np.array([101.0, 102.0])
+        lo = np.array([99.0, 100.0])
+        c = np.array([100.0, 101.0])
+        entries = np.array([False, True])
+        sides = np.array([0, 1])
+        stops = np.array([np.nan, 90.0])
+        tps = np.array([np.nan, 120.0])
+
+        _, trades = VectorizedBacktester(o, h, lo, c).run(entries, sides, stops, tps)
+
+        assert trades == []
+
+    def test_exit_bar_equity_uses_fill_price_and_all_costs(self):
+        o = np.array([100.0, 100.0, 100.0])
+        h = np.array([101.0, 101.0, 101.0])
+        lo = np.array([99.0, 99.0, 94.0])
+        c = np.array([100.0, 100.0, 100.0])
+        entries = np.array([True, False, False])
+        sides = np.array([1, 0, 0])
+        stops = np.array([95.0, np.nan, np.nan])
+        tps = np.array([120.0, np.nan, np.nan])
+
+        equity, trades = VectorizedBacktester(
+            o, h, lo, c, commission_bps=100.0,
+        ).run(entries, sides, stops, tps, risk_per_trade=0.02)
+
+        assert len(trades) == 1
+        assert trades[0].pnl == pytest.approx(-278.0)
+        assert equity[2] == pytest.approx(9_722.0)
+
     def test_gap_aware_stop(self):
         """Price gaps past stop — should fill at open, not stop."""
         o = np.array([100.0, 85.0])

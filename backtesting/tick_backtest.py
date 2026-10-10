@@ -90,6 +90,9 @@ class TickBacktester:
         Margin requirement fraction.
     symbol : str
         Instrument identifier.
+    contract_multipliers : dict, optional
+        Per-symbol multiplier converting price changes into account-currency
+        P&L. Defaults to 1.0.
     """
 
     def __init__(
@@ -105,6 +108,7 @@ class TickBacktester:
         margin_rate: float = 0.0,
         symbol: str = "default",
         latency_broker: Optional[LatencyAwareBroker] = None,
+        contract_multipliers: Optional[dict] = None,
     ):
         if config is not None:
             self.portfolio = Portfolio(**config.to_kwargs())
@@ -116,6 +120,8 @@ class TickBacktester:
                 max_leverage=max_leverage,
                 margin_rate=margin_rate,
             )
+        if contract_multipliers:
+            self.portfolio.contract_multipliers = dict(contract_multipliers)
         self.broker = self.portfolio.broker
         strategy._broker = self.broker
 
@@ -126,10 +132,6 @@ class TickBacktester:
 
         self.aggregator = TickAggregator(timeframe)
         self.latency_broker = latency_broker
-
-        _tf_hours = {"M1": 1/60, "M5": 5/60, "M15": 15/60, "M30": 30/60,
-                     "H1": 1.0, "H4": 4.0, "D1": 24.0, "W1": 168.0, "MN1": 720.0}
-        self._bar_hours = _tf_hours.get(timeframe, 1.0)
 
         # Detect whether strategy overrides on_tick / manage_position_tick.
         # If not, we skip those calls entirely in the hot loop.
@@ -159,10 +161,7 @@ class TickBacktester:
         self.bar_equity_curve: Optional[np.ndarray] = None
         self.trades: List[Trade] = []
         self.bars: List[Bar] = []
-
-        # Auto-compute daily volatility from tick prices if ADV is set but vol is not
-        if self.portfolio.typical_daily_volume is not None and self.portfolio.daily_volatility is None:
-            self.portfolio.compute_daily_volatility(self._prices)
+        self._has_run = False
 
     def run(self) -> Tuple[np.ndarray, List[Trade]]:
         """Run the tick-level backtest.
@@ -172,6 +171,12 @@ class TickBacktester:
         tuple of (np.ndarray, list[Trade])
             Equity curve (one value per tick) and list of closed trades.
         """
+        if self._has_run:
+            raise RuntimeError(
+                "TickBacktester instances are single-use; create a new instance to rerun"
+            )
+        self._has_run = True
+
         n_ticks = len(self.ticks)
         if n_ticks == 0:
             self.equity_curve = np.array([], dtype=np.float64)
@@ -201,6 +206,9 @@ class TickBacktester:
         comm_bps = portfolio.commission_bps
         max_leverage = portfolio.max_leverage
 
+        # Contract multiplier for this symbol, scaled into mark-to-market P&L.
+        multiplier = portfolio.contract_multiplier(symbol)
+
         # Pre-allocate equity curve
         equity_arr = np.empty(n_ticks, dtype=np.float64)
 
@@ -218,10 +226,12 @@ class TickBacktester:
 
         # Scalars cached from portfolio
         cash = portfolio.cash
-        peak_equity = portfolio.peak_equity
-        max_drawdown = portfolio.max_drawdown
         has_margin = portfolio.margin_rate > 0
         margin_rate = portfolio.margin_rate
+        funding_enabled = (
+            portfolio.funding_rate_annual != 0
+            or portfolio.funding_rate_short != 0
+        )
 
         # Latency broker (optional)
         latency_broker = self.latency_broker
@@ -238,6 +248,16 @@ class TickBacktester:
         for t_idx in range(n_ticks):
             price = prices[t_idx]
             tick_boundary = bar_boundaries[t_idx]
+
+            # Accrue funding for calendar time elapsed since the previous tick
+            # on positions carried into this tick. Actual timestamps make
+            # weekend/holiday gaps accrue the correct amount.
+            if funding_enabled and t_idx > 0:
+                elapsed_hours = (
+                    timestamps[t_idx] - timestamps[t_idx - 1]
+                ).total_seconds() / 3600.0
+                if elapsed_hours > 0:
+                    portfolio.accrue_funding(elapsed_hours)
 
             # --- Fast bar boundary check (int comparison, no floor()) ---
             completed_bar = None
@@ -299,17 +319,13 @@ class TickBacktester:
             if has_positions:
                 open_pnl = 0.0
                 for tr in open_pos:
-                    open_pnl += (price - tr.entry_price) * tr.side * tr.size
+                    open_pnl += (price - tr.entry_price) * tr.side * tr.size * multiplier
                 equity = cash + open_pnl
             else:
                 equity = cash
 
             # --- Bar completion: call on_bar ---
             if completed_bar is not None:
-                # Accrue funding costs at bar boundary
-                portfolio.accrue_funding(self._bar_hours)
-                cash = portfolio.cash
-
                 completed_bars.append(completed_bar)
                 bar_equities.append(equity)
 
@@ -355,9 +371,6 @@ class TickBacktester:
             on_bar(bar_index, last_bar, equity_arr[-1])
 
         # --- Sync final state ---
-        portfolio.peak_equity = peak_equity
-        portfolio.max_drawdown = max_drawdown
-
         self.equity_curve = equity_arr
         self.bar_equity_curve = np.array(bar_equities, dtype=np.float64)
         self.trades = broker.closed_trades

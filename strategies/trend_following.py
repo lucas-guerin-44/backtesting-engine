@@ -106,6 +106,22 @@ class TrendFollowingStrategy(Strategy):
         self._current_atr: float = 0.0
         self._has_position = False
         self._trend_side: int = 0
+        self.warmup_bars = 5 * max(fast_period, slow_period, atr_period, trend_filter_period)
+
+    def warmup_bar(self, bar: Bar) -> None:
+        fast_val = self._fast_ema.update(bar.close)
+        slow_val = self._slow_ema.update(bar.close)
+        atr_val = self._atr.update(bar.high, bar.low, bar.close)
+        self._trend_filter.update(bar.close)
+        if atr_val is not None:
+            self._current_atr = atr_val
+        if fast_val is not None and slow_val is not None:
+            if self._prev_fast is not None and self._prev_slow is not None:
+                if self._prev_fast <= self._prev_slow and fast_val > slow_val:
+                    self._trend_side = 1
+                elif self._prev_fast >= self._prev_slow and fast_val < slow_val:
+                    self._trend_side = -1
+            self._prev_fast, self._prev_slow = fast_val, slow_val
 
     def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Trade]:
         fast_val = self._fast_ema.update(bar.close)
@@ -169,7 +185,8 @@ class TrendFollowingStrategy(Strategy):
         tp = (None if self.use_trailing_stop
               else entry + side * atr_val * self.atr_target_mult)
         size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
-                                  self._peak_equity, self.max_dd_halt)
+                                  self._peak_equity, self.max_dd_halt,
+                                  self._contract_multiplier)
         result = self._make_trade(bar, side, entry, stop, tp, size)
         if result is not None:
             self._has_position = True

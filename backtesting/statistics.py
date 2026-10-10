@@ -3,7 +3,7 @@
 Three tests, each answering a different question:
 
 - ``bootstrap_sharpe_ci``:  "Is the Sharpe statistically different from zero?"
-- ``permutation_test``:     "Could random trades have produced this Sharpe?"
+- ``permutation_test``:     "Is return drift unusual under a blocked sign-flip null?"
 - ``deflated_sharpe_ratio``:"Is this Sharpe still significant after testing N param combos?"
 
 The Deflated Sharpe Ratio is based on Bailey & Lopez de Prado (2014),
@@ -42,6 +42,8 @@ def compute_sharpe(equity_curve, risk_free: float = 0.0, annualize: bool = True,
         The Sharpe ratio, or 0.0 if it cannot be computed.
     """
     equity_curve = np.array(equity_curve, dtype=float)
+    if len(equity_curve) < 3 or freq_per_year <= 0:
+        return 0.0
 
     valid_idx = equity_curve[:-1] > 1e-8
     if not np.any(valid_idx):
@@ -50,14 +52,30 @@ def compute_sharpe(equity_curve, risk_free: float = 0.0, annualize: bool = True,
     returns = np.diff(equity_curve)[valid_idx] / equity_curve[:-1][valid_idx]
     excess_returns = returns - risk_free / freq_per_year
 
-    if np.std(excess_returns, ddof=1) == 0:
+    std = np.std(excess_returns, ddof=1)
+    if not np.isfinite(std) or std == 0:
         return 0.0
 
-    sharpe = np.mean(excess_returns) / np.std(excess_returns, ddof=1)
+    sharpe = np.mean(excess_returns) / std
     if annualize:
         sharpe *= np.sqrt(freq_per_year)
 
     return sharpe
+
+
+def period_returns(equity_curve) -> np.ndarray:
+    """Per-period simple returns from an equity curve.
+
+    Uses the same valid-step filter as the bootstrap/permutation tests so the
+    DSR moments and the resampled statistics describe the same return series.
+    """
+    equity_curve = np.asarray(equity_curve, dtype=np.float64)
+    if len(equity_curve) < 2:
+        return np.array([], dtype=np.float64)
+    valid = equity_curve[:-1] > 1e-8
+    if not np.any(valid):
+        return np.array([], dtype=np.float64)
+    return np.diff(equity_curve)[valid] / equity_curve[:-1][valid]
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +137,8 @@ class StatisticalReport:
     bootstrap_ci: SharpeCI
     permutation_test: PermutationTestResult
     deflated_sharpe: Optional[DeflatedSharpeResult]
+    skewness: float = 0.0
+    kurtosis: float = 3.0
 
     def __str__(self) -> str:
         lines = [
@@ -171,6 +191,9 @@ def bootstrap_sharpe_ci(
     equity_curve = np.asarray(equity_curve, dtype=np.float64)
     observed = compute_sharpe(equity_curve, risk_free=risk_free,
                               freq_per_year=freq_per_year)
+
+    if freq_per_year <= 0:
+        return SharpeCI(observed, 0.0, 0.0, confidence, n_bootstrap, False)
 
     if len(equity_curve) < 3:
         return SharpeCI(observed, observed, observed, confidence, n_bootstrap, False)
@@ -225,13 +248,15 @@ def permutation_test(
     risk_free: float = 0.0,
     freq_per_year: int = 252,
     seed: Optional[int] = None,
+    block_size: int = 5,
 ) -> PermutationTestResult:
-    """Monte Carlo permutation test for Sharpe ratio significance.
+    """Sign-flip test for whether bar returns have positive/negative drift.
 
-    Shuffles trade PnL signs to build a null distribution of Sharpe ratios
-    under the hypothesis that trade direction has no predictive value.
-
-    If trades is empty, falls back to shuffling return time series.
+    The test operates on equity-curve returns so null and observed Sharpe
+    ratios have the same units. Excess returns are centered under the null,
+    then flipped in short contiguous blocks to retain some local dependence.
+    ``trades`` remains accepted for API compatibility but is not used because
+    trade PnLs cannot be compared directly with a bar-level Sharpe ratio.
 
     Parameters
     ----------
@@ -245,6 +270,8 @@ def permutation_test(
         Significance level (default 0.05).
     seed : int, optional
         Random seed for reproducibility.
+    block_size : int
+        Number of adjacent returns sharing a sign flip.
 
     Returns
     -------
@@ -254,45 +281,37 @@ def permutation_test(
     observed = compute_sharpe(equity_curve, risk_free=risk_free,
                               freq_per_year=freq_per_year)
 
+    if block_size < 1:
+        raise ValueError("block_size must be >= 1")
+    if n_permutations < 1:
+        raise ValueError("n_permutations must be >= 1")
+
+    valid = equity_curve[:-1] > 1e-8
+    returns = np.diff(equity_curve)[valid] / equity_curve[:-1][valid]
+    if len(returns) < 2 or freq_per_year <= 0:
+        return PermutationTestResult(observed, 1.0, 0.0, n_permutations, False)
+
+    excess = returns - risk_free / freq_per_year
+    centered = excess - excess.mean()
     rng = np.random.default_rng(seed)
-
-    # Extract trade PnLs
-    pnls = np.array([t.pnl for t in trades if t.pnl is not None], dtype=np.float64)
-
-    if len(pnls) < 2:
-        # Fall back to return-level shuffling
-        if len(equity_curve) < 3:
-            return PermutationTestResult(observed, 1.0, 0.0, n_permutations, False)
-
-        valid = equity_curve[:-1] > 1e-8
-        if not np.any(valid):
-            return PermutationTestResult(observed, 1.0, 0.0, n_permutations, False)
-
-        returns = np.diff(equity_curve)[valid] / equity_curve[:-1][valid]
-        null_sharpes = np.empty(n_permutations)
-        for i in range(n_permutations):
-            shuffled = rng.permutation(returns)
-            std = np.std(shuffled, ddof=1)
-            if std > 0:
-                null_sharpes[i] = (np.mean(shuffled) / std) * np.sqrt(freq_per_year)
-            else:
-                null_sharpes[i] = 0.0
-    else:
-        # Shuffle trade PnL signs (vectorized)
-        signs = rng.choice([-1.0, 1.0], size=(n_permutations, len(pnls)))
-        shuffled_pnls = pnls * signs  # (n_permutations, n_trades)
-
-        means = shuffled_pnls.mean(axis=1)
-        stds = shuffled_pnls.std(axis=1, ddof=1)
-        valid_mask = stds > 0
-        null_sharpes = np.zeros(n_permutations)
-        null_sharpes[valid_mask] = means[valid_mask] / stds[valid_mask]
+    n_blocks = (len(excess) + block_size - 1) // block_size
+    block_signs = rng.choice([-1.0, 1.0], size=(n_permutations, n_blocks))
+    signs = np.repeat(block_signs, block_size, axis=1)[:, :len(excess)]
+    null_returns = centered[None, :] * signs
+    means = null_returns.mean(axis=1)
+    stds = null_returns.std(axis=1, ddof=1)
+    null_sharpes = np.zeros(n_permutations)
+    valid_std = stds > 0
+    null_sharpes[valid_std] = (
+        means[valid_std] / stds[valid_std] * np.sqrt(freq_per_year)
+    )
 
     # p-value: fraction of null Sharpes >= observed
     if observed >= 0:
-        p_value = float(np.mean(null_sharpes >= observed))
+        extreme = np.count_nonzero(null_sharpes >= observed)
     else:
-        p_value = float(np.mean(null_sharpes <= observed))
+        extreme = np.count_nonzero(null_sharpes <= observed)
+    p_value = float((extreme + 1) / (n_permutations + 1))
 
     percentile = float(np.mean(null_sharpes <= observed) * 100)
 
@@ -315,6 +334,7 @@ def deflated_sharpe_ratio(
     skewness: float = 0.0,
     kurtosis: float = 3.0,
     all_trial_sharpes: Optional[np.ndarray] = None,
+    freq_per_year: float = 1.0,
 ) -> DeflatedSharpeResult:
     """Deflated Sharpe Ratio (Bailey & Lopez de Prado, 2014).
 
@@ -335,24 +355,29 @@ def deflated_sharpe_ratio(
     kurtosis : float
         Kurtosis of returns (3.0 for normal).
     all_trial_sharpes : np.ndarray, optional
-        Sharpe ratios from all trials. If provided, the variance of the
-        Sharpe estimator is computed directly; otherwise, the asymptotic
-        formula is used.
+        Annualized Sharpe ratios from all trials. If provided, their variance
+        is converted to per-period units before applying the DSR formula.
+    freq_per_year : float
+        Observations per year used to annualize the input Sharpe ratios.
 
     Returns
     -------
     DeflatedSharpeResult
     """
-    if n_trials <= 0 or n_observations <= 1:
+    if n_trials <= 0 or n_observations <= 1 or freq_per_year <= 0:
         return DeflatedSharpeResult(observed_sharpe, observed_sharpe, 0.5, max(n_trials, 1), False)
+
+    annualization = np.sqrt(freq_per_year)
+    observed_period_sharpe = observed_sharpe / annualization
 
     # Variance of the Sharpe ratio estimator
     if all_trial_sharpes is not None and len(all_trial_sharpes) > 1:
-        sr_var = float(np.var(all_trial_sharpes, ddof=1))
+        period_sharpes = np.asarray(all_trial_sharpes, dtype=np.float64) / annualization
+        sr_var = float(np.var(period_sharpes, ddof=1))
     else:
         # Asymptotic formula: Var(SR) ≈ (1 - skew*SR + (kurt-1)/4 * SR²) / T
-        sr_var = (1.0 - skewness * observed_sharpe +
-                  (kurtosis - 1) / 4.0 * observed_sharpe ** 2) / n_observations
+        sr_var = (1.0 - skewness * observed_period_sharpe +
+                  (kurtosis - 1) / 4.0 * observed_period_sharpe ** 2) / n_observations
 
     sr_std = np.sqrt(max(sr_var, 1e-12))
 
@@ -367,13 +392,15 @@ def deflated_sharpe_ratio(
             (1.0 - _EULER_MASCHERONI) * z1 + _EULER_MASCHERONI * z2
         )
 
-    # Deflated Sharpe = observed - expected max under null
-    deflated = observed_sharpe - expected_max_sr
+    # Compute in per-period units, then return the deflated ratio in the same
+    # annualized units as observed_sharpe.
+    deflated_period = observed_period_sharpe - expected_max_sr
+    deflated = deflated_period * annualization
 
     # p-value: probability of observing this SR by chance
     # P(SR* > observed | null) using the SR distribution
     if sr_std > 0:
-        z_score = deflated / sr_std
+        z_score = deflated_period / sr_std
         p_value = 1.0 - float(stats.norm.cdf(z_score))
     else:
         p_value = 0.5
@@ -394,10 +421,13 @@ def deflated_sharpe_ratio(
 def compute_statistical_report(
     equity_curve: np.ndarray,
     trades: list,
-    n_trials_tested: int = 1,
+    n_trials_tested: int,
+    returns: Optional[np.ndarray] = None,
     n_bootstrap: int = 10_000,
     n_permutations: int = 5_000,
     seed: Optional[int] = None,
+    freq_per_year: int = 252,
+    risk_free: float = 0.0,
 ) -> StatisticalReport:
     """Run all three statistical tests and return a combined report.
 
@@ -408,35 +438,89 @@ def compute_statistical_report(
     trades : list
         List of Trade objects.
     n_trials_tested : int
-        Number of parameter combinations tested (for DSR). Pass 1 if this
-        is a single backtest, or the number of optimizer trials.
+        Number of parameter combinations actually evaluated during development
+        (for the DSR). Required: callers must state how many trials they ran
+        rather than silently defaulting to a single trial.
+    returns : np.ndarray, optional
+        Per-period return series aligned with ``equity_curve``. When omitted,
+        it is derived from the equity curve. Its skewness and kurtosis feed the
+        DSR variance so the adjustment does not assume normality.
     n_bootstrap : int
         Bootstrap resamples for CI.
     n_permutations : int
         Permutations for the permutation test.
     seed : int, optional
         Random seed.
+    freq_per_year : int
+        Observations per year used to annualize the Sharpe statistics.
+    risk_free : float
+        Annual risk-free rate applied to each return series.
 
     Returns
     -------
     StatisticalReport
     """
+    if n_trials_tested is None or n_trials_tested < 1:
+        raise ValueError("n_trials_tested must be a positive integer")
+
     equity_curve = np.asarray(equity_curve, dtype=np.float64)
+    if freq_per_year <= 0:
+        raise ValueError("freq_per_year must be > 0")
 
-    ci = bootstrap_sharpe_ci(equity_curve, n_bootstrap=n_bootstrap, seed=seed)
+    ci = bootstrap_sharpe_ci(
+        equity_curve, n_bootstrap=n_bootstrap, seed=seed,
+        freq_per_year=freq_per_year, risk_free=risk_free,
+    )
 
-    perm = permutation_test(equity_curve, trades, n_permutations=n_permutations, seed=seed)
+    perm = permutation_test(
+        equity_curve, trades, n_permutations=n_permutations, seed=seed,
+        freq_per_year=freq_per_year, risk_free=risk_free,
+    )
+
+    ret = period_returns(equity_curve) if returns is None else np.asarray(returns, dtype=np.float64)
+    if len(ret) > 3 and np.std(ret) > 0:
+        skewness = float(stats.skew(ret))
+        kurtosis = float(stats.kurtosis(ret, fisher=False))
+    else:
+        skewness, kurtosis = 0.0, 3.0
 
     dsr = None
     if n_trials_tested > 1 and len(equity_curve) > 1:
-        observed = compute_sharpe(equity_curve)
+        observed = compute_sharpe(
+            equity_curve, risk_free=risk_free, freq_per_year=freq_per_year,
+        )
         dsr = deflated_sharpe_ratio(
             observed_sharpe=observed,
             n_trials=n_trials_tested,
             n_observations=len(equity_curve) - 1,
+            skewness=skewness,
+            kurtosis=kurtosis,
+            freq_per_year=freq_per_year,
         )
 
-    return StatisticalReport(bootstrap_ci=ci, permutation_test=perm, deflated_sharpe=dsr)
+    return StatisticalReport(
+        bootstrap_ci=ci, permutation_test=perm, deflated_sharpe=dsr,
+        skewness=skewness, kurtosis=kurtosis,
+    )
+
+
+def passes_statistical_gate(report: Optional[StatisticalReport], alpha: float = 0.05) -> bool:
+    """Phase-3 statistical gate from ``docs/WORKFLOW.md``.
+
+    Passes when the bootstrap 95% CI excludes zero, the permutation p-value is
+    ``<= alpha``, and the deflated Sharpe p-value is ``<= alpha`` (Bailey &
+    Lopez de Prado 2014). A missing DSR (e.g. ``n_trials_tested == 1``) fails.
+    """
+    if report is None:
+        return False
+    if not report.bootstrap_ci.significant:
+        return False
+    if report.permutation_test.p_value > alpha:
+        return False
+    dsr = report.deflated_sharpe
+    if dsr is None or dsr.p_value > alpha:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -469,9 +553,7 @@ def compute_stats(
     """
     eq = np.asarray(equity_curve, dtype=np.float64)
 
-    # Filter out leading zeros (warmup period)
-    valid = eq > 1e-8
-    if not np.any(valid):
+    if len(eq) == 0 or not np.any(eq > 1e-8):
         return {k: 0.0 for k in [
             "sharpe", "sortino", "calmar", "max_drawdown", "cagr",
             "total_return_pct", "win_rate", "profit_factor",
@@ -479,13 +561,13 @@ def compute_stats(
             "avg_bars_held",
         ]}
 
-    eq = eq[valid]
-
     # Sharpe (reuse compute_sharpe)
     sharpe = compute_sharpe(eq, risk_free=risk_free, freq_per_year=freq_per_year)
 
     # Returns (for Sortino, CAGR, etc.)
-    returns = np.diff(eq) / eq[:-1]
+    prior_equity = eq[:-1]
+    valid_prior = prior_equity > 1e-8
+    returns = np.diff(eq)[valid_prior] / prior_equity[valid_prior]
     if risk_free > 0:
         returns = returns - risk_free / freq_per_year
 
@@ -500,8 +582,11 @@ def compute_stats(
     max_dd = float(np.max(dd)) if len(dd) > 0 else 0.0
 
     # CAGR
-    n_years = len(eq) / freq_per_year
-    cagr = (eq[-1] / eq[0]) ** (1.0 / n_years) - 1.0 if n_years > 0 and eq[0] > 0 else 0.0
+    n_years = max(len(eq) - 1, 0) / freq_per_year
+    if n_years > 0 and eq[0] > 0:
+        cagr = -1.0 if eq[-1] <= 0 else (eq[-1] / eq[0]) ** (1.0 / n_years) - 1.0
+    else:
+        cagr = 0.0
 
     # Calmar
     calmar = cagr / max_dd if max_dd > 0 else 0.0
@@ -580,8 +665,7 @@ def print_report(
     stats = compute_stats(eq, trades, freq_per_year=freq_per_year)
 
     if years is None:
-        valid_len = int(np.sum(eq > 1e-8)) if len(eq) > 0 else 0
-        years = valid_len / freq_per_year if freq_per_year > 0 else 1.0
+        years = max(len(eq) - 1, 0) / freq_per_year if freq_per_year > 0 else 1.0
 
     print()
     print("=" * 50)

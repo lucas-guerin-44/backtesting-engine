@@ -45,6 +45,12 @@ class MomentumStrategy(Strategy):
         self._atr = ATR(atr_period)
         self._closes: deque = deque(maxlen=lookback + 1)
         self._trend_filter = TrendFilter(trend_filter_period)
+        self.warmup_bars = 5 * max(lookback, atr_period, trend_filter_period)
+
+    def warmup_bar(self, bar: Bar) -> None:
+        self._closes.append(bar.close)
+        self._atr.update(bar.high, bar.low, bar.close)
+        self._trend_filter.update(bar.close)
 
     def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Trade]:
         self._closes.append(bar.close)
@@ -66,7 +72,8 @@ class MomentumStrategy(Strategy):
             stop = entry - atr_val * self.atr_stop_mult
             tp = entry + atr_val * self.atr_target_mult
             size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
-                                      self._peak_equity, self.max_dd_halt)
+                                      self._peak_equity, self.max_dd_halt,
+                                      self._contract_multiplier)
             return self._make_trade(bar, 1, entry, stop, tp, size)
 
         if roc < -self.entry_threshold:
@@ -76,7 +83,8 @@ class MomentumStrategy(Strategy):
             stop = entry + atr_val * self.atr_stop_mult
             tp = entry - atr_val * self.atr_target_mult
             size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
-                                      self._peak_equity, self.max_dd_halt)
+                                      self._peak_equity, self.max_dd_halt,
+                                      self._contract_multiplier)
             return self._make_trade(bar, -1, entry, stop, tp, size)
 
         return None

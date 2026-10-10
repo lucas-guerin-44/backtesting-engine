@@ -9,7 +9,8 @@ Instead of iterating bar-by-bar in Python, this module:
 Throughput: ~1-3M bars/sec (vs ~300k for the event-driven Backtester).
 
 Trade-off: strategies must express their logic as array operations — no
-arbitrary per-bar state. For strategies with complex inter-bar state
+arbitrary per-bar state. Signals are filled at the next bar's open, matching
+the event-driven engine. A final-bar signal cannot fill. For strategies with complex inter-bar state
 (e.g., tracking FVG zones), use the event-driven ``Backtester`` instead.
 
 Example::
@@ -45,7 +46,7 @@ except ImportError:
 
 @dataclass
 class VectorizedTrade:
-    """Compact trade record from the vectorized backtester."""
+    """Compact trade record; pnl includes entry and exit commissions."""
     entry_idx: int
     exit_idx: int
     side: int
@@ -95,6 +96,7 @@ class VectorizedBacktester:
         self.starting_cash = starting_cash
         self.comm_factor = commission_bps / 1e4
         self.slip_factor = slippage_bps / 1e4
+        self._has_run = False
 
     def run(
         self,
@@ -111,7 +113,7 @@ class VectorizedBacktester:
         Parameters
         ----------
         entries : np.ndarray (bool)
-            True on bars where the strategy wants to enter.
+            True on signal bars. Execution is at the following bar's open.
         sides : np.ndarray (int)
             +1 for long, -1 for short on each bar.
         stop_prices : np.ndarray (float)
@@ -130,6 +132,13 @@ class VectorizedBacktester:
         tuple of (np.ndarray, list[VectorizedTrade])
             Equity curve and list of closed trades.
         """
+        if self._has_run:
+            raise RuntimeError(
+                "VectorizedBacktester instances are single-use; create a new "
+                "instance to rerun"
+            )
+        self._has_run = True
+
         c = self.close
 
         if _HAS_CYTHON:
@@ -193,6 +202,11 @@ class VectorizedBacktester:
             stop = stop_prices[bar]
             tp = tp_prices[bar]
 
+            # Close-based signals execute at the next bar's open.
+            entry_idx = bar + 1
+            if entry_idx >= n:
+                break
+
             if np.isnan(stop) or np.isnan(tp) or side == 0:
                 bar += 1
                 continue
@@ -203,12 +217,13 @@ class VectorizedBacktester:
                 continue
 
             dd_scale = max(0.0, 1.0 - dd / max_dd_halt)
-            risk_per_unit = abs(c[bar] - stop)
+            entry_price = o[entry_idx] * (1.0 + side * slip)
+            # Size against the actual slipped next-open fill, not the signal close.
+            risk_per_unit = abs(entry_price - stop)
             if risk_per_unit <= 0:
                 bar += 1
                 continue
 
-            entry_price = c[bar] * (1.0 + side * slip)
             size = (cash * risk_per_trade * dd_scale) / risk_per_unit
             size = min(size, cash / entry_price) if entry_price > 0 else 0.0
 
@@ -222,18 +237,18 @@ class VectorizedBacktester:
                 continue
             cash -= entry_comm
 
-            exit_idx, exit_price = self._find_exit(bar, side, stop, tp)
+            exit_idx, exit_price = self._find_exit(entry_idx, side, stop, tp)
             exit_price_adj = exit_price * (1.0 - side * slip)
 
             pnl = (exit_price_adj - entry_price) * side * size
             exit_comm = abs(exit_price_adj * size * comm)
-            net_pnl = pnl - exit_comm
-            cash += net_pnl
+            net_pnl = pnl - entry_comm - exit_comm
+            cash += pnl - exit_comm
 
             peak_equity = max(peak_equity, cash)
 
             trades.append(VectorizedTrade(
-                entry_idx=bar, exit_idx=exit_idx, side=side, size=size,
+                entry_idx=entry_idx, exit_idx=exit_idx, side=side, size=size,
                 entry_price=entry_price, exit_price=exit_price_adj, pnl=net_pnl,
             ))
 
@@ -320,6 +335,10 @@ class VectorizedBacktester:
             trade_slice = slice(t.entry_idx, min(t.exit_idx + 1, n))
             unrealized = (close[trade_slice] - t.entry_price) * t.side * t.size
             equity[trade_slice] = trade_base + unrealized
+
+            # On the exit bar use the modeled fill and both commissions rather
+            # than marking at the bar close after an intrabar stop/target fill.
+            equity[t.exit_idx] = self.starting_cash + realized + t.pnl
 
             realized += t.pnl
             prev_end = t.exit_idx + 1

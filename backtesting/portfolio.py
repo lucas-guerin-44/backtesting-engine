@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from backtesting.broker import Broker
+from backtesting.instruments import InstrumentSpec
 from backtesting.types import Bar
 
 
@@ -35,10 +36,11 @@ class Portfolio:
                  margin_rate: float = 0.1,
                  typical_daily_volume: Optional[float] = None,
                  impact_scaling: float = 0.5,
-                 daily_volatility: Optional[float] = None,
-                 funding_rate_annual: float = 0.0,
-                 funding_rate_short: float = 0.0,
-                 margin_call_threshold: float = 0.5):
+                  daily_volatility: Optional[float] = None,
+                  funding_rate_annual: float = 0.0,
+                  funding_rate_short: float = 0.0,
+                  margin_call_threshold: float = 0.5,
+                  contract_multipliers: Optional[Dict[str, float]] = None):
         self.cash = cash
         self.commission_bps = commission_bps
         self.slippage_bps = slippage_bps
@@ -51,6 +53,9 @@ class Portfolio:
         self.funding_rate_annual = funding_rate_annual
         self.funding_rate_short = funding_rate_short
         self.margin_call_threshold = margin_call_threshold
+        self.contract_multipliers = dict(contract_multipliers or {})
+        self.instrument_specs: Dict[str, InstrumentSpec] = {}
+        self.last_prices: Dict[str, float] = {}
 
         self.equity_curve = []
         self.peak_equity = cash
@@ -61,14 +66,30 @@ class Portfolio:
         self.trade_count = 0
         self.trades = []
 
-    def impact_slippage_bps(self, order_size: float) -> float:
+    def contract_multiplier(self, symbol: str) -> float:
+        """Return the configured P&L/notional multiplier for a symbol."""
+        spec = self.instrument_specs.get(symbol)
+        if spec is not None:
+            return spec.contract_multiplier
+        return self.contract_multipliers.get(symbol, 1.0)
+
+    def impact_slippage_bps(self, order_size: float, symbol: Optional[str] = None) -> float:
         base = self.slippage_bps + self.spread_bps
-        if self.typical_daily_volume is None or self.daily_volatility is None:
+        spec = self.instrument_specs.get(symbol) if symbol is not None else None
+        adv = (
+            spec.typical_daily_volume if spec and spec.typical_daily_volume is not None
+            else self.typical_daily_volume
+        )
+        volatility = (
+            spec.daily_volatility if spec and spec.daily_volatility is not None
+            else self.daily_volatility
+        )
+        if adv is None or volatility is None:
             return base
-        if self.typical_daily_volume <= 0 or order_size <= 0:
+        if adv <= 0 or order_size <= 0:
             return base
-        participation = order_size / self.typical_daily_volume
-        impact = self.daily_volatility * (participation ** 0.5) * self.impact_scaling
+        participation = order_size / adv
+        impact = volatility * (participation ** 0.5) * self.impact_scaling
         return base + impact
 
     def compute_daily_volatility(self, close_prices: np.ndarray) -> None:
@@ -91,7 +112,9 @@ class Portfolio:
         total = 0.0
         for sym, position in self.broker.positions.items():
             for lot in position:
-                notional = abs(lot.entry_price * lot.size)
+                notional = abs(
+                    lot.entry_price * lot.size * self.contract_multiplier(sym)
+                )
                 rate = self.funding_rate_annual if lot.side > 0 else self.funding_rate_short
                 accrual = notional * (rate / 100.0) * (bar_hours / 24.0) / 365.0
                 total += accrual
@@ -118,8 +141,9 @@ class Portfolio:
             px = current_prices.get(sym)
             if px is None:
                 continue
+            multiplier = self.contract_multiplier(sym)
             for lot in position:
-                open_pnl += (px - lot.entry_price) * lot.side * lot.size
+                open_pnl += (px - lot.entry_price) * lot.side * lot.size * multiplier
         return self.cash + open_pnl
 
     def gross_notional(self, current_prices: Dict[str, float]) -> float:
@@ -129,8 +153,9 @@ class Portfolio:
             px = current_prices.get(sym)
             if px is None:
                 continue
+            multiplier = self.contract_multiplier(sym)
             for lot in position:
-                gross += abs(px * lot.size)
+                gross += abs(px * lot.size * multiplier)
         return gross
 
     def update(self, ts: pd.Timestamp, current_prices: Dict[str, float]) -> None:

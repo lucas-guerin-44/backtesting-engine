@@ -53,7 +53,14 @@ import pandas as pd
 
 from backtesting.backtest import Backtester
 from backtesting.indicators import ema_array
-from backtesting.statistics import compute_sharpe
+from backtesting.statistics import (
+    StatisticalReport,
+    compute_sharpe,
+    compute_statistical_report,
+    passes_statistical_gate,
+)
+from backtesting.strategy import Strategy
+from backtesting.types import Bar
 from backtesting.vectorized import VectorizedBacktester
 from backtesting.vectorized_signals import (
     trend_following_signals, mean_reversion_signals,
@@ -225,6 +232,36 @@ def _average_top_k_params(
 # Core optimization
 # ---------------------------------------------------------------------------
 
+def _statistical_report(
+    run_backtest: Callable[[Dict[str, Any]], Tuple[np.ndarray, list]],
+    params: Dict[str, Any],
+    n_trials_tested: int,
+    freq_per_year: int,
+    seed: Optional[int],
+) -> Optional[StatisticalReport]:
+    """Run the Phase-3 statistical battery on a single configuration.
+
+    Returns ``None`` (rather than raising) if the backtest or battery fails, so
+    optimization results are never lost to a diagnostic.
+    """
+    try:
+        equity_curve, trades = run_backtest(params)
+    except Exception as e:
+        logger.warning(f"Statistical report skipped (backtest failed): {e}")
+        return None
+    try:
+        return compute_statistical_report(
+            equity_curve=equity_curve,
+            trades=trades,
+            n_trials_tested=n_trials_tested,
+            seed=seed,
+            freq_per_year=freq_per_year,
+        )
+    except Exception as e:
+        logger.warning(f"Statistical report failed: {e}")
+        return None
+
+
 @dataclass
 class OptimizationResult:
     """Result from a single optimization run."""
@@ -233,6 +270,24 @@ class OptimizationResult:
     objective_name: str
     n_trials: int
     all_trials: pd.DataFrame  # Every trial's params + score
+    seed: Optional[int]
+    n_trials_tested: int = 0
+    statistical_report: Optional[StatisticalReport] = None
+
+    @property
+    def bootstrap_ci(self):
+        """Bootstrap Sharpe CI for the best configuration, if computed."""
+        return self.statistical_report.bootstrap_ci if self.statistical_report else None
+
+    @property
+    def deflated_sharpe_p_value(self) -> Optional[float]:
+        """Deflated Sharpe p-value for the best configuration, if computed."""
+        dsr = self.statistical_report.deflated_sharpe if self.statistical_report else None
+        return dsr.p_value if dsr is not None else None
+
+    def passes_statistical_gate(self, alpha: float = 0.05) -> bool:
+        """Whether the result clears the Phase-3 statistical gate."""
+        return passes_statistical_gate(self.statistical_report, alpha=alpha)
 
 
 @dataclass
@@ -243,6 +298,28 @@ class WalkForwardResult:
     out_of_sample_mean: float     # Average OOS objective (the real metric)
     degradation: float            # IS mean - OOS mean (overfitting signal)
     summary: pd.DataFrame         # DataFrame of all splits
+    oos_index: pd.Index           # Chronological timestamps for stitched OOS curve
+    oos_equity_curve: np.ndarray  # Compounded marked-to-market OOS equity
+    oos_sharpe: float             # Sharpe of the complete stitched OOS curve
+    oos_total_return_pct: float   # Return over the stitched OOS periods
+    seed: Optional[int]
+    n_trials_tested: int = 0
+    statistical_report: Optional[StatisticalReport] = None
+
+    @property
+    def bootstrap_ci(self):
+        """Bootstrap Sharpe CI for the stitched OOS curve, if computed."""
+        return self.statistical_report.bootstrap_ci if self.statistical_report else None
+
+    @property
+    def deflated_sharpe_p_value(self) -> Optional[float]:
+        """Deflated Sharpe p-value for the stitched OOS curve, if computed."""
+        dsr = self.statistical_report.deflated_sharpe if self.statistical_report else None
+        return dsr.p_value if dsr is not None else None
+
+    def passes_statistical_gate(self, alpha: float = 0.05) -> bool:
+        """Whether the OOS result clears the Phase-3 statistical gate."""
+        return passes_statistical_gate(self.statistical_report, alpha=alpha)
 
 
 def optimize(
@@ -260,6 +337,9 @@ def optimize(
     min_trades: int = 0,
     top_k_avg: int = 1,
     engine: str = "event",
+    seed: Optional[int] = None,
+    freq_per_year: Optional[int] = None,
+    compute_statistics: bool = True,
 ) -> OptimizationResult:
     """Optimize strategy parameters using Bayesian search (Optuna TPE).
 
@@ -287,6 +367,16 @@ def optimize(
         Instrument symbol.
     fixed_params : dict, optional
         Parameters to pass to the strategy that are NOT optimized.
+    seed : int, optional
+        Random seed for Optuna's sampler. Use ``n_jobs=1`` for deterministic
+        trial ordering and fully reproducible results.
+    freq_per_year : int, optional
+        Annualization periods. If omitted, estimated from observed timestamps;
+        set explicitly for short samples or a selected market-calendar convention.
+    compute_statistics : bool
+        Attach a Phase-3 ``StatisticalReport`` for the best configuration using
+        ``n_trials`` as the multiple-testing count. Set False for internal
+        nested calls where the caller computes the report itself.
 
     Returns
     -------
@@ -298,9 +388,13 @@ def optimize(
 
     if engine not in ("event", "vectorized"):
         raise ValueError(f"Unknown engine '{engine}'. Choose 'event' or 'vectorized'.")
+    if seed is not None and n_jobs != 1:
+        raise ValueError("Seeded optimization requires n_jobs=1 for reproducibility")
+    if freq_per_year is not None and freq_per_year <= 0:
+        raise ValueError("freq_per_year must be > 0")
 
     fixed = fixed_params or {}
-    freq = infer_freq_per_year(df.index)
+    freq = int(freq_per_year) if freq_per_year is not None else infer_freq_per_year(df.index)
 
     # Pre-extract OHLC arrays once for vectorized engine
     if engine == "vectorized":
@@ -321,53 +415,50 @@ def optimize(
             "open", "high", "low", "close",
         }
 
-    def _objective(trial: optuna.Trial) -> float:
-        params = {name: _suggest_param(trial, name, bounds)
-                  for name, bounds in param_space.items()}
-        if not _check_constraints(params):
-            return -999.0
-        params.update(fixed)
+    def _run_backtest(params: Dict[str, Any]):
+        """Run one backtest for ``params``; return (equity_curve, trades)."""
+        if engine == "vectorized":
+            # Filter params to only those the signal function accepts
+            sig_kwargs = {k: v for k, v in params.items()
+                          if k in _sig_params}
+            entries, sides, stops, tps = sig_fn(
+                _ohlc_open, _ohlc_high, _ohlc_low, _ohlc_close,
+                **sig_kwargs,
+            )
 
+            # Post-processing: apply trend filter if requested
+            tfp = params.get("trend_filter_period", 0)
+            if tfp and tfp > 0:
+                trend_ema = ema_array(_ohlc_close, int(tfp))
+                # Mask out longs where close < ema, shorts where close > ema
+                long_mask = (_ohlc_close < trend_ema) & (sides == 1)
+                short_mask = (_ohlc_close > trend_ema) & (sides == -1)
+                block = long_mask | short_mask
+                entries = entries & ~block
+                sides = np.where(block, 0, sides)
+
+            bt = VectorizedBacktester(
+                _ohlc_open, _ohlc_high, _ohlc_low, _ohlc_close,
+                starting_cash=starting_cash,
+                commission_bps=commission_bps,
+                slippage_bps=slippage_bps,
+            )
+            return bt.run(
+                entries, sides, stops, tps,
+                risk_per_trade=params.get("risk_per_trade", 0.02),
+                max_dd_halt=params.get("max_dd_halt", 0.15),
+                cooldown_bars=params.get("cooldown_bars", 10),
+            )
+
+        strategy = strategy_cls(**params)
+        bt = Backtester(df, strategy, starting_cash=starting_cash,
+                        commission_bps=commission_bps, slippage_bps=slippage_bps,
+                        symbol=symbol, freq_per_year=freq)
+        return bt.run()
+
+    def _evaluate_params(params: Dict[str, Any], trial_number=None) -> float:
         try:
-            if engine == "vectorized":
-                # Filter params to only those the signal function accepts
-                sig_kwargs = {k: v for k, v in params.items()
-                              if k in _sig_params}
-                entries, sides, stops, tps = sig_fn(
-                    _ohlc_open, _ohlc_high, _ohlc_low, _ohlc_close,
-                    **sig_kwargs,
-                )
-
-                # Post-processing: apply trend filter if requested
-                tfp = params.get("trend_filter_period", 0)
-                if tfp and tfp > 0:
-                    trend_ema = ema_array(_ohlc_close, int(tfp))
-                    # Mask out longs where close < ema, shorts where close > ema
-                    long_mask = (_ohlc_close < trend_ema) & (sides == 1)
-                    short_mask = (_ohlc_close > trend_ema) & (sides == -1)
-                    block = long_mask | short_mask
-                    entries = entries & ~block
-                    sides = np.where(block, 0, sides)
-
-                bt = VectorizedBacktester(
-                    _ohlc_open, _ohlc_high, _ohlc_low, _ohlc_close,
-                    starting_cash=starting_cash,
-                    commission_bps=commission_bps,
-                    slippage_bps=slippage_bps,
-                )
-                equity_curve, trades = bt.run(
-                    entries, sides, stops, tps,
-                    risk_per_trade=params.get("risk_per_trade", 0.02),
-                    max_dd_halt=params.get("max_dd_halt", 0.15),
-                    cooldown_bars=params.get("cooldown_bars", 10),
-                )
-            else:
-                strategy = strategy_cls(**params)
-                bt = Backtester(df, strategy, starting_cash=starting_cash,
-                                commission_bps=commission_bps, slippage_bps=slippage_bps,
-                                symbol=symbol)
-                equity_curve, trades = bt.run()
-
+            equity_curve, trades = _run_backtest(params)
             score = obj_fn(equity_curve, trades, freq_per_year=freq)
             if not np.isfinite(score):
                 return -999.0
@@ -375,10 +466,21 @@ def optimize(
                 score = score * (len(trades) / min_trades)
             return score
         except Exception as e:
-            logger.warning(f"Trial {trial.number} failed: {e}")
+            label = f"Trial {trial_number}" if trial_number is not None else "Candidate params"
+            logger.warning(f"{label} failed: {e}")
             return -999.0
 
-    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler())
+    def _objective(trial: optuna.Trial) -> float:
+        params = {name: _suggest_param(trial, name, bounds)
+                  for name, bounds in param_space.items()}
+        if not _check_constraints(params):
+            return -999.0
+        params.update(fixed)
+        return _evaluate_params(params, trial.number)
+
+    study = optuna.create_study(
+        direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed),
+    )
     study.optimize(_objective, n_trials=n_trials, n_jobs=n_jobs)
 
     # Build trials DataFrame
@@ -391,13 +493,28 @@ def optimize(
 
     best_params = (_average_top_k_params(study, param_space, top_k_avg)
                    if top_k_avg > 1 else study.best_params)
+    best_score = study.best_value
+    if top_k_avg > 1:
+        # The averaged parameter set is a new candidate, not the best trial.
+        # Re-score it so structured results always pair matching params/score.
+        best_score = _evaluate_params({**best_params, **fixed})
+
+    report = None
+    if compute_statistics:
+        report = _statistical_report(
+            _run_backtest, {**best_params, **fixed},
+            n_trials_tested=n_trials, freq_per_year=freq, seed=seed,
+        )
 
     return OptimizationResult(
         best_params=best_params,
-        best_score=study.best_value,
+        best_score=best_score,
         objective_name=objective,
         n_trials=n_trials,
         all_trials=trials_df,
+        seed=seed,
+        n_trials_tested=n_trials,
+        statistical_report=report,
     )
 
 
@@ -419,12 +536,16 @@ def walk_forward(
     top_k_avg: int = 1,
     anchored: bool = False,
     engine: str = "event",
+    seed: Optional[int] = None,
+    freq_per_year: Optional[int] = None,
+    warmup_bars: Optional[int] = None,
+    compute_statistics: bool = True,
 ) -> WalkForwardResult:
     """Walk-forward optimization: the only honest way to evaluate parameter tuning.
 
-    Splits the data into ``n_splits`` rolling windows. For each window:
-    1. Optimize parameters on the training portion (in-sample).
-    2. Evaluate the best parameters on the test portion (out-of-sample).
+    Reserves the first ``train_ratio`` of the data for initial training, then
+    divides the remaining history into contiguous OOS test periods. Each fold
+    optimizes on past data only; OOS equity is compounded across test periods.
 
     The gap between in-sample and out-of-sample performance is the
     **degradation** — a direct measure of overfitting.
@@ -440,13 +561,17 @@ def walk_forward(
     n_splits : int
         Number of walk-forward windows.
     train_ratio : float
-        Fraction of each window used for training (rest is test).
+        Fraction of the full dataset reserved for initial training. Remaining
+        bars are divided into contiguous OOS test periods.
     n_trials : int
         Optuna trials per training window.
     objective : str
         Objective function name.
     starting_cash : float
         Initial cash for each split.
+    seed : int, optional
+        Base sampler seed. Each fold uses ``seed + fold_index``. Seeded runs
+        require ``n_jobs=1`` for deterministic trial ordering.
     commission_bps : float
         Commission in basis points.
     slippage_bps : float
@@ -455,6 +580,18 @@ def walk_forward(
         Instrument symbol.
     fixed_params : dict, optional
         Non-optimized parameters.
+    freq_per_year : int, optional
+        Annualization periods shared by all training and OOS folds. If omitted,
+        estimated once from the full dataset's observed timestamps.
+    warmup_bars : int, optional
+        Historical bars used to prime each OOS fold without scoring them or
+        allowing entries. If omitted, uses the strategy's ``warmup_bars`` value.
+        Custom event-driven strategies should override ``warmup_bar(bar)`` to
+        update indicator state without placing trades.
+    compute_statistics : bool
+        Attach a Phase-3 ``StatisticalReport`` for the stitched OOS equity curve.
+        The multiple-testing count is ``n_trials * n_splits`` (every parameter
+        combination evaluated across every fold).
 
     Returns
     -------
@@ -465,23 +602,44 @@ def walk_forward(
         raise ValueError(f"Unknown objective '{objective}'. Choose from: {list(OBJECTIVES)}")
 
     freq = infer_freq_per_year(df.index)
+    if freq_per_year is not None:
+        if freq_per_year <= 0:
+            raise ValueError("freq_per_year must be > 0")
+        freq = int(freq_per_year)
+    if not 0.0 < train_ratio < 1.0:
+        raise ValueError("train_ratio must be between 0 and 1")
+    if n_splits < 1:
+        raise ValueError("n_splits must be >= 1")
+    if warmup_bars is not None and warmup_bars < 0:
+        raise ValueError("warmup_bars must be >= 0")
+
     total_bars = len(df)
-    window_size = total_bars // n_splits
-    if window_size < 50:
-        raise ValueError(f"Not enough data: {total_bars} bars / {n_splits} splits = "
-                         f"{window_size} bars per window (need at least 50)")
+    initial_train_bars = int(total_bars * train_ratio)
+    oos_bars = total_bars - initial_train_bars
+    test_size = oos_bars // n_splits if n_splits > 0 else 0
+    if initial_train_bars < 50 or test_size < 10:
+        raise ValueError(
+            f"Not enough data: {initial_train_bars} initial training bars and "
+            f"{test_size} bars per OOS split (need at least 50 and 10)"
+        )
 
     fixed = fixed_params or {}
     splits = []
+    oos_curves = [np.array([starting_cash], dtype=np.float64)]
+    oos_timestamps = [df.index[initial_train_bars - 1]]
+    oos_cash = starting_cash
 
     for split_idx in range(n_splits):
-        window_start = split_idx * window_size
-        window_end = min(window_start + window_size, total_bars)
-        split_point = window_start + int((window_end - window_start) * train_ratio)
+        test_start_idx = initial_train_bars + split_idx * test_size
+        test_end_idx = total_bars if split_idx == n_splits - 1 else test_start_idx + test_size
+        train_end_idx = test_start_idx
+        if anchored:
+            train_start_idx = 0
+        else:
+            train_start_idx = max(0, train_end_idx - initial_train_bars)
 
-        train_start_idx = 0 if anchored else window_start
-        train_df = df.iloc[train_start_idx:split_point]
-        test_df = df.iloc[split_point:window_end]
+        train_df = df.iloc[train_start_idx:train_end_idx]
+        test_df = df.iloc[test_start_idx:test_end_idx]
 
         if len(train_df) < 30 or len(test_df) < 10:
             continue
@@ -497,28 +655,52 @@ def walk_forward(
             n_trials=n_trials, objective=objective, starting_cash=starting_cash,
             commission_bps=commission_bps, slippage_bps=slippage_bps,
             symbol=symbol, fixed_params=fixed_params, n_jobs=n_jobs,
+            seed=(seed + split_idx if seed is not None else None),
             min_trades=min_trades, top_k_avg=top_k_avg, engine=engine,
+            freq_per_year=freq, compute_statistics=False,
         )
 
         # 2. Evaluate best params on test data (out-of-sample)
         best_params = {**opt_result.best_params, **fixed}
+        oos_starting_cash = oos_cash
+        warmup_strategy = strategy_cls(**best_params)
+        requested_warmup = (
+            int(warmup_bars) if warmup_bars is not None
+            else max(0, int(getattr(warmup_strategy, "warmup_bars", 0)))
+        )
+        if (
+            engine == "event"
+            and requested_warmup > 0
+            and type(warmup_strategy).warmup_bar is Strategy.warmup_bar
+        ):
+            raise ValueError(
+                f"{strategy_cls.__name__} requests warm-up bars but does not "
+                "override Strategy.warmup_bar()"
+            )
+        warmup_start_idx = max(train_start_idx, test_start_idx - requested_warmup)
+        actual_warmup = test_start_idx - warmup_start_idx
+        context_test_df = df.iloc[warmup_start_idx:test_end_idx]
 
         if engine == "vectorized":
             sig_fn = _VECTORIZED_SIGNALS[strategy_cls.__name__]
             _sig_params = set(inspect.signature(sig_fn).parameters.keys()) - {
                 "open", "high", "low", "close",
             }
-            t_col = {c.lower(): c for c in test_df.columns}
-            t_open = test_df[t_col["open"]].to_numpy(dtype=np.float64)
-            t_high = test_df[t_col["high"]].to_numpy(dtype=np.float64)
-            t_low = test_df[t_col["low"]].to_numpy(dtype=np.float64)
-            t_close = test_df[t_col["close"]].to_numpy(dtype=np.float64)
+            t_col = {c.lower(): c for c in context_test_df.columns}
+            t_open = context_test_df[t_col["open"]].to_numpy(dtype=np.float64)
+            t_high = context_test_df[t_col["high"]].to_numpy(dtype=np.float64)
+            t_low = context_test_df[t_col["low"]].to_numpy(dtype=np.float64)
+            t_close = context_test_df[t_col["close"]].to_numpy(dtype=np.float64)
 
             sig_kwargs = {k: v for k, v in best_params.items()
                           if k in _sig_params}
             entries, sides, stops, tps = sig_fn(
                 t_open, t_high, t_low, t_close, **sig_kwargs,
             )
+            # Context contributes indicator history only; it must not open
+            # positions or affect OOS equity.
+            entries[:actual_warmup] = False
+            sides[:actual_warmup] = 0
 
             tfp = best_params.get("trend_filter_period", 0)
             if tfp and tfp > 0:
@@ -531,24 +713,39 @@ def walk_forward(
 
             bt = VectorizedBacktester(
                 t_open, t_high, t_low, t_close,
-                starting_cash=starting_cash,
+                starting_cash=oos_starting_cash,
                 commission_bps=commission_bps,
                 slippage_bps=slippage_bps,
             )
-            eq, trades = bt.run(
+            combined_eq, trades = bt.run(
                 entries, sides, stops, tps,
                 risk_per_trade=best_params.get("risk_per_trade", 0.02),
                 max_dd_halt=best_params.get("max_dd_halt", 0.15),
                 cooldown_bars=best_params.get("cooldown_bars", 10),
             )
+            eq = combined_eq[actual_warmup:]
         else:
-            strategy = strategy_cls(**best_params)
-            bt = Backtester(test_df, strategy, starting_cash=starting_cash,
+            strategy = warmup_strategy
+            if actual_warmup:
+                context_open = context_test_df["open"].to_numpy(dtype=np.float64)[:actual_warmup]
+                context_high = context_test_df["high"].to_numpy(dtype=np.float64)[:actual_warmup]
+                context_low = context_test_df["low"].to_numpy(dtype=np.float64)[:actual_warmup]
+                context_close = context_test_df["close"].to_numpy(dtype=np.float64)[:actual_warmup]
+                warmup_method = strategy.warmup_bar
+                for i in range(actual_warmup):
+                    warmup_method(Bar(
+                        df.index[warmup_start_idx + i], context_open[i],
+                        context_high[i], context_low[i], context_close[i],
+                    ))
+            bt = Backtester(test_df, strategy, starting_cash=oos_starting_cash,
                             commission_bps=commission_bps, slippage_bps=slippage_bps,
-                            symbol=symbol)
-            eq, trades = bt.run()
+                            symbol=symbol, freq_per_year=freq)
+            eq, trades = bt.run(liquidate_at_end=True)
 
         oos_score = obj_fn(eq, trades, freq_per_year=freq)
+        oos_cash = float(eq[-1]) if len(eq) else oos_cash
+        oos_curves.append(np.asarray(eq, dtype=np.float64))
+        oos_timestamps.extend(test_df.index.tolist())
 
         split_result = {
             "split": split_idx,
@@ -558,10 +755,11 @@ def walk_forward(
             "test_end": str(test_end.date()),
             "train_bars": len(train_df),
             "test_bars": len(test_df),
+            "warmup_bars": actual_warmup,
             "best_params": opt_result.best_params,
             "in_sample_score": round(opt_result.best_score, 4),
             "out_of_sample_score": round(oos_score, 4),
-            "oos_return_pct": round((eq[-1] - starting_cash) / starting_cash * 100, 2),
+            "oos_return_pct": round((eq[-1] - oos_starting_cash) / oos_starting_cash * 100, 2),
             "oos_max_dd_pct": round(bt.max_drawdown * 100, 2),
             "oos_trades": len(trades),
         }
@@ -582,6 +780,7 @@ def walk_forward(
         "split": s["split"],
         "train": f"{s['train_start']} to {s['train_end']}",
         "test": f"{s['test_start']} to {s['test_end']}",
+        "warmup_bars": s["warmup_bars"],
         "IS_score": s["in_sample_score"],
         "OOS_score": s["out_of_sample_score"],
         "OOS_return_pct": s["oos_return_pct"],
@@ -589,10 +788,38 @@ def walk_forward(
         "OOS_trades": s["oos_trades"],
     } for s in splits])
 
+    stitched_equity = np.concatenate(oos_curves)
+    stitched_index = pd.Index(oos_timestamps)
+    stitched_return = (
+        (oos_cash - starting_cash) / starting_cash * 100.0
+        if starting_cash > 0 else 0.0
+    )
+
+    n_trials_tested = n_trials * len(splits)
+    report = None
+    if compute_statistics:
+        try:
+            report = compute_statistical_report(
+                equity_curve=stitched_equity,
+                trades=[],
+                n_trials_tested=n_trials_tested,
+                seed=seed,
+                freq_per_year=freq,
+            )
+        except Exception as e:
+            logger.warning(f"Statistical report failed: {e}")
+
     return WalkForwardResult(
         splits=splits,
         in_sample_mean=round(np.mean(is_scores), 4),
         out_of_sample_mean=round(np.mean(oos_scores), 4),
         degradation=round(np.mean(is_scores) - np.mean(oos_scores), 4),
         summary=summary_df,
+        oos_index=stitched_index,
+        oos_equity_curve=stitched_equity,
+        oos_sharpe=round(compute_sharpe(stitched_equity, freq_per_year=freq), 4),
+        oos_total_return_pct=round(stitched_return, 2),
+        seed=seed,
+        n_trials_tested=n_trials_tested,
+        statistical_report=report,
     )

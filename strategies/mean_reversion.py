@@ -46,6 +46,13 @@ class MeanReversionStrategy(Strategy):
         self._rsi = RSI(rsi_period)
         self._atr = ATR(atr_period)
         self._trend_filter = TrendFilter(trend_filter_period)
+        self.warmup_bars = 5 * max(bb_period, rsi_period, atr_period, trend_filter_period)
+
+    def warmup_bar(self, bar: Bar) -> None:
+        self._bb.update(bar.close)
+        self._rsi.update(bar.close)
+        self._atr.update(bar.high, bar.low, bar.close)
+        self._trend_filter.update(bar.close)
 
     def on_bar(self, i: int, bar: Bar, equity: float) -> Optional[Trade]:
         bb_lower, bb_mid, bb_upper = self._bb.update(bar.close)
@@ -66,7 +73,8 @@ class MeanReversionStrategy(Strategy):
             entry = bar.close
             stop = entry - atr_val * self.atr_stop_mult
             size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
-                                      self._peak_equity, self.max_dd_halt)
+                                      self._peak_equity, self.max_dd_halt,
+                                      self._contract_multiplier)
             return self._make_trade(bar, 1, entry, stop, bb_mid, size)
 
         # Short: upper band + overbought
@@ -76,7 +84,8 @@ class MeanReversionStrategy(Strategy):
             entry = bar.close
             stop = entry + atr_val * self.atr_stop_mult
             size = risk_adjusted_size(equity, entry, stop, self.risk_per_trade,
-                                      self._peak_equity, self.max_dd_halt)
+                                      self._peak_equity, self.max_dd_halt,
+                                      self._contract_multiplier)
             return self._make_trade(bar, -1, entry, stop, bb_mid, size)
 
         return None

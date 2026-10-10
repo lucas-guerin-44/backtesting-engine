@@ -8,7 +8,8 @@ import pytest
 import pandas as pd
 
 from backtesting.statistics import compute_sharpe
-from utils import infer_freq_per_year, normalize_tf, sanitize
+import utils as data_utils
+from utils import fetch_ohlc, infer_freq_per_year, normalize_tf, sanitize
 
 
 class TestComputeSharpe:
@@ -41,20 +42,29 @@ class TestComputeSharpe:
 
 class TestInferFreqPerYear:
     def test_daily_bars(self):
-        ts = pd.date_range("2024-01-01", periods=100, freq="B")  # Business days
-        assert infer_freq_per_year(ts) == 252
+        ts = pd.date_range("2022-01-01", "2024-01-01", freq="B")  # Business days
+        assert 250 <= infer_freq_per_year(ts) <= 263
 
-    def test_hourly_bars(self):
-        ts = pd.date_range("2024-01-01", periods=100, freq="h")
-        assert infer_freq_per_year(ts) == 6_570
+    def test_intraday_session_bars_reflect_market_closures(self):
+        days = pd.date_range("2022-01-01", "2024-01-01", freq="B")
+        session_hours = pd.to_timedelta([f"{hour}:00:00" for hour in range(10, 16)])
+        ts = pd.DatetimeIndex([
+            day + offset for day in days for offset in session_hours
+        ])
+        freq = infer_freq_per_year(ts)
+        assert 1_500 <= freq <= 1_600
 
     def test_5min_bars(self):
         ts = pd.date_range("2024-01-01", periods=100, freq="5min")
-        assert infer_freq_per_year(ts) == 105_120
+        assert infer_freq_per_year(ts) == 105_192
 
     def test_4h_bars(self):
         ts = pd.date_range("2024-01-01", periods=100, freq="4h")
-        assert infer_freq_per_year(ts) == 1_643
+        assert infer_freq_per_year(ts) == 2_192
+
+    def test_short_sample_uses_observed_calendarized_rate(self):
+        ts = pd.date_range("2024-01-01", periods=100, freq="B")
+        assert infer_freq_per_year(ts) == 264
 
     def test_single_timestamp_returns_default(self):
         ts = pd.DatetimeIndex(["2024-01-01"])
@@ -75,6 +85,52 @@ class TestNormalizeTf:
 
     def test_unknown_passthrough(self):
         assert normalize_tf("W1") == "W1"
+
+
+def test_cached_and_fresh_data_apply_identical_session_filters(tmp_path, monkeypatch):
+    rows = [
+        {"instrument": "TEST", "timeframe": "M1", "timestamp": "2024-01-02T14:00:00Z",
+         "open": 100, "high": 101, "low": 99, "close": 100},  # Before RTH
+        {"instrument": "TEST", "timeframe": "M1", "timestamp": "2024-01-02T14:30:00Z",
+         "open": 101, "high": 102, "low": 100, "close": 101},  # RTH open
+        {"instrument": "TEST", "timeframe": "M1", "timestamp": "2024-01-02T20:59:00Z",
+         "open": 102, "high": 103, "low": 101, "close": 102},  # Before RTH close
+        {"instrument": "TEST", "timeframe": "M1", "timestamp": "2024-01-02T21:00:00Z",
+         "open": 103, "high": 104, "low": 102, "close": 103},  # At RTH close
+        {"instrument": "TEST", "timeframe": "M1", "timestamp": "2024-01-03T15:00:00Z",
+         "open": 104, "high": 105, "low": 103, "close": 104},  # Inclusive end date
+    ]
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    pd.DataFrame(rows).to_csv(cache_dir / "TEST_M1.csv", index=False)
+
+    monkeypatch.setattr(data_utils, "LOCAL_DATA_DIR", str(cache_dir))
+    cached = fetch_ohlc(
+        "TEST", "M1", "2024-01-02", "2024-01-03",
+        session_tz="America/New_York", rth_open=930, rth_close=1600,
+        weekday_filter=[1, 2],
+    )
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return rows
+
+    monkeypatch.setattr(data_utils.requests, "get", lambda *args, **kwargs: Response())
+    fresh_dir = tmp_path / "fresh"
+    fresh_dir.mkdir()
+    monkeypatch.setattr(data_utils, "LOCAL_DATA_DIR", str(fresh_dir))
+    fresh = fetch_ohlc(
+        "TEST", "M1", "2024-01-02", "2024-01-03",
+        session_tz="America/New_York", rth_open=930, rth_close=1600,
+        weekday_filter=[1, 2],
+    )
+
+    pd.testing.assert_index_equal(cached.index, fresh.index)
+    pd.testing.assert_frame_equal(cached, fresh, check_dtype=False)
+    assert len(cached) == 3
 
 
 class TestSanitize:

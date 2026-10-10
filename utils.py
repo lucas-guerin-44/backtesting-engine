@@ -71,11 +71,18 @@ def fetch_ohlc(
     if os.path.exists(filepath):
         df = pd.read_csv(filepath, parse_dates=["timestamp"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-        start_ts = pd.to_datetime(start_date).tz_localize("UTC")
-        end_ts = pd.to_datetime(end_date).tz_localize("UTC")
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date)
+        start_ts = start_ts.tz_localize("UTC") if start_ts.tzinfo is None else start_ts.tz_convert("UTC")
+        end_ts = end_ts.tz_localize("UTC") if end_ts.tzinfo is None else end_ts.tz_convert("UTC")
+        # Date-only end values are inclusive, matching the API query bounds.
+        if end_ts == end_ts.normalize():
+            end_ts += pd.Timedelta(hours=23, minutes=59, seconds=59)
         df = df[(df["timestamp"] >= start_ts) & (df["timestamp"] <= end_ts)]
         if not df.empty:
-            return df
+            return _apply_session_filter(
+                df, session_tz, rth_open, rth_close, weekday_filter,
+            )
 
     url = f"{DATALAKE_URL}/query"
     page_size = 10_000

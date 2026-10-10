@@ -131,6 +131,13 @@ class TestUtility:
         df2 = pd.DataFrame({"a": [4, 5, 6]})
         assert ResultsDB.compute_data_hash(df1) != ResultsDB.compute_data_hash(df2)
 
+    def test_data_hash_covers_interior_rows(self):
+        import pandas as pd
+        df1 = pd.DataFrame({"a": [1, 2, 3, 4, 5, 6, 7]})
+        df2 = df1.copy()
+        df2.loc[3, "a"] = 30
+        assert ResultsDB.compute_data_hash(df1) != ResultsDB.compute_data_hash(df2)
+
     def test_context_manager(self, tmp_path):
         with ResultsDB(str(tmp_path / "cm.db")) as db:
             db.save_run("Test", {}, make_equity(), [])

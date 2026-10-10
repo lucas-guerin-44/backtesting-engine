@@ -187,6 +187,9 @@ class ResultsDB:
             "in_sample_mean": wf_result.in_sample_mean,
             "out_of_sample_mean": wf_result.out_of_sample_mean,
             "degradation": wf_result.degradation,
+            "seed": getattr(wf_result, "seed", None),
+            "oos_sharpe": getattr(wf_result, "oos_sharpe", None),
+            "oos_total_return_pct": getattr(wf_result, "oos_total_return_pct", None),
         }
 
         cur = self.conn.execute(
@@ -317,14 +320,18 @@ class ResultsDB:
 
     @staticmethod
     def compute_data_hash(df: pd.DataFrame) -> str:
-        """Hash DataFrame shape + head/tail for reproducibility tracking."""
+        """Hash all rows, columns, dtypes, and index values for provenance."""
         h = hashlib.sha256()
-        h.update(str(df.shape).encode())
-        h.update(str(df.columns.tolist()).encode())
-        if len(df) > 0:
-            h.update(df.head(5).to_csv().encode())
-            h.update(df.tail(5).to_csv().encode())
-        return h.hexdigest()[:16]
+        h.update(str((df.shape, df.columns.tolist(), df.dtypes.astype(str).tolist())).encode())
+        # Chunking avoids materializing a second full-size representation of
+        # large historical datasets while still covering every observation.
+        chunk_size = 65_536
+        for start in range(0, len(df), chunk_size):
+            row_hashes = pd.util.hash_pandas_object(
+                df.iloc[start:start + chunk_size], index=True,
+            )
+            h.update(row_hashes.to_numpy(dtype=np.uint64).tobytes())
+        return h.hexdigest()
 
     def close(self) -> None:
         self.conn.close()

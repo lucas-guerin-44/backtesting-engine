@@ -234,8 +234,9 @@ class LatencyAwareBroker:
             self._execute_fill(order, fill, tick)
             filled_qty += fill.qty
         remaining = order.qty - filled_qty
-        if remaining > 1e-9:
-            # Partially or fully resting in the book
+        if remaining > 1e-9 and order.type == OrderType.LIMIT:
+            # Only limit orders rest. Market and stop orders are immediate-or-
+            # cancel: any quantity not matched at submission remains unfilled.
             self._resting[order.order_id] = (order, remaining)
 
     def _apply_resting_fill(self, fill: Fill, tick: Tick) -> None:
@@ -292,10 +293,14 @@ class LatencyAwareBroker:
                     if order.side > 0
                     else (tick.bid if tick.bid is not None else tick_price)
                 )
+                # Fill at the marketable price, which is already on the
+                # favorable side of the limit (ask <= limit for buys,
+                # bid >= limit for sells). This passes through price
+                # improvement instead of always filling at the limit.
                 if order.side > 0 and ref_px <= order.limit_price:
-                    self._execute(order, tick, order.limit_price)
+                    self._execute(order, tick, ref_px)
                 elif order.side < 0 and ref_px >= order.limit_price:
-                    self._execute(order, tick, order.limit_price)
+                    self._execute(order, tick, ref_px)
                 else:
                     still_pending.append(po)
 

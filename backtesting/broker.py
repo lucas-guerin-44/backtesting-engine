@@ -29,8 +29,9 @@ class Broker:
         self.positions: Dict[str, Position] = {}
         self.closed_trades: List[Trade] = []
 
-    def _price_with_slippage(self, px: float, side: int, order_size: float = 0.0) -> float:
-        slip_bps = self.portfolio.impact_slippage_bps(order_size)
+    def _price_with_slippage(self, px: float, side: int, order_size: float = 0.0,
+                             symbol: Optional[str] = None) -> float:
+        slip_bps = self.portfolio.impact_slippage_bps(order_size, symbol)
         return px * (1 + side * slip_bps / 1e4)
 
     def _commission_cost(self, notional: float) -> float:
@@ -87,23 +88,35 @@ class Broker:
 
         raw_price = entry_price if entry_price is not None else bar.open
         prices = current_prices if current_prices is not None else {symbol: bar.close}
+        multiplier = self.portfolio.contract_multiplier(symbol)
 
-        notional = abs(raw_price * size)
+        if size <= 0 or raw_price <= 0:
+            return
+
         remaining_bp = self._remaining_buying_power(prices)
-        if notional > remaining_bp:
-            size = remaining_bp / raw_price
-            notional = abs(raw_price * size)
+
+        # Size against the *slipped* fill price so market impact cannot push
+        # gross notional past the leverage cap. Impact depends on size, so
+        # re-price after resizing and clamp once more if it grew.
+        entry_px = self._price_with_slippage(raw_price, side, size, symbol)
+        filled_notional = abs(entry_px * size * multiplier)
+        if filled_notional > remaining_bp:
+            size = remaining_bp / (entry_px * multiplier)
+            entry_px = self._price_with_slippage(raw_price, side, size, symbol)
+            filled_notional = abs(entry_px * size * multiplier)
+            if filled_notional > remaining_bp:
+                size *= remaining_bp / filled_notional
+                entry_px = self._price_with_slippage(raw_price, side, size, symbol)
+                filled_notional = abs(entry_px * size * multiplier)
         if size <= 0:
             return
 
-        commission = self._commission_cost(notional)
+        commission = self._commission_cost(filled_notional)
         if self.portfolio.cash < commission:
             return
 
-        entry_px = self._price_with_slippage(raw_price, side, size)
-
         # Margin check: ensure equity covers projected margin requirement
-        projected_gross = self.portfolio.gross_notional(prices) + notional
+        projected_gross = self.portfolio.gross_notional(prices) + filled_notional
         projected_margin = projected_gross * self.portfolio.margin_rate
         projected_equity = self.portfolio.compute_equity(prices)
         if projected_equity < projected_margin:
@@ -112,6 +125,7 @@ class Broker:
         lot = Lot(
             entry_bar=bar, side=side, size=size, entry_price=entry_px,
             stop_price=stop, take_profit=take_profit, symbol=symbol,
+            entry_commission=commission,
         )
 
         self.positions.setdefault(symbol, Position()).append(lot)
@@ -121,18 +135,22 @@ class Broker:
     def position_size(self, symbol: str, price: float, stop: float,
                       risk_fraction: float = 0.01) -> float:
         """Compute trade size based on a fixed-risk fraction of equity."""
-        equity = self.portfolio.compute_equity({symbol: price})
-        gross = self.portfolio.gross_notional({symbol: price})
+        prices = dict(self.portfolio.last_prices)
+        prices[symbol] = price
+        equity = self.portfolio.compute_equity(prices)
+        gross = self.portfolio.gross_notional(prices)
         remaining_bp = max(0.0, equity * self.portfolio.max_leverage - gross)
+        multiplier = self.portfolio.contract_multiplier(symbol)
 
         risk_per_unit = abs(price - stop)
         if risk_per_unit <= 0:
             return 0.0
 
-        units = (equity * risk_fraction) / risk_per_unit
-        return min(units, remaining_bp / price)
+        units = (equity * risk_fraction) / (risk_per_unit * multiplier)
+        return min(units, remaining_bp / (price * multiplier))
 
-    def close_due_to_stop(self, symbol: str, bar: Bar) -> None:
+    def close_due_to_stop(self, symbol: str, bar: Bar,
+                          lots: Optional[List[Lot]] = None) -> None:
         """Execute stop losses with gap-aware fill logic.
 
         If the bar opens past the stop (gap), the fill is at the open price
@@ -141,8 +159,12 @@ class Broker:
         """
         if symbol not in self.positions:
             return
+        position = self.positions[symbol]
+        candidates = list(position) if lots is None else list(lots)
         still_open = []
-        for lot in self.positions[symbol]:
+        for lot in candidates:
+            if lot not in position:
+                continue
             exit_raw = None
             if lot.side > 0:
                 if bar.open <= lot.stop_price:
@@ -157,16 +179,25 @@ class Broker:
 
             if exit_raw is not None:
                 self._close_lot(lot, exit_raw, symbol, bar)
+                if lots is not None:
+                    position.remove(lot)
             else:
-                still_open.append(lot)
-        self.positions[symbol].lots = still_open
+                if lots is None:
+                    still_open.append(lot)
+        if lots is None:
+            position.lots = still_open
 
-    def close_due_to_tp(self, symbol: str, bar: Bar) -> None:
+    def close_due_to_tp(self, symbol: str, bar: Bar,
+                        lots: Optional[List[Lot]] = None) -> None:
         """Execute take-profit orders. Each lot checked individually."""
         if symbol not in self.positions:
             return
+        position = self.positions[symbol]
+        candidates = list(position) if lots is None else list(lots)
         still_open = []
-        for lot in self.positions[symbol]:
+        for lot in candidates:
+            if lot not in position:
+                continue
             exit_raw = None
             if lot.take_profit is not None:
                 if lot.side > 0 and bar.high >= lot.take_profit:
@@ -176,9 +207,13 @@ class Broker:
 
             if exit_raw is not None:
                 self._close_lot(lot, exit_raw, symbol, bar)
+                if lots is not None:
+                    position.remove(lot)
             else:
-                still_open.append(lot)
-        self.positions[symbol].lots = still_open
+                if lots is None:
+                    still_open.append(lot)
+        if lots is None:
+            position.lots = still_open
 
     def close_trade(self, symbol: str, lot: Lot, bar: Bar) -> None:
         """Force-close a specific lot at the bar's open price."""
@@ -189,21 +224,27 @@ class Broker:
 
     def _close_lot(self, lot: Lot, raw_price: float, symbol: str, bar: Bar) -> None:
         """Apply slippage/commission, convert lot to trade, and record it."""
-        exit_px = self._price_with_slippage(raw_price, -lot.side, lot.size)
-        notional = abs(exit_px * lot.size)
+        exit_px = self._price_with_slippage(
+            raw_price, -lot.side, lot.size, symbol or lot.symbol,
+        )
+        multiplier = self.portfolio.contract_multiplier(symbol or lot.symbol)
+        notional = abs(exit_px * lot.size * multiplier)
         commission = self._commission_cost(notional)
 
         # Convert lot to a closed Trade record
+        gross_pnl = (exit_px - lot.entry_price) * lot.side * lot.size * multiplier
         trade = Trade(
             entry_bar=lot.entry_bar, side=lot.side, size=lot.size,
             entry_price=lot.entry_price, stop_price=lot.stop_price,
             take_profit=lot.take_profit, symbol=symbol or lot.symbol,
             limit_price=None, bars_held=lot.bars_held,
             exit_price=exit_px, exit_ts=bar.ts,
-            pnl=(exit_px - lot.entry_price) * lot.side * lot.size,
+            pnl=gross_pnl - lot.entry_commission - commission,
             metadata=lot.metadata,
         )
-        self.portfolio.cash += trade.pnl - commission
+        # Entry commission was deducted when the lot was opened. Realize gross
+        # P&L less only exit commission here; the trade record is net of both.
+        self.portfolio.cash += gross_pnl - commission
         self.closed_trades.append(trade)
 
     def close_lot_at_price(self, lot: Lot, price: float, symbol: str, ts) -> None:

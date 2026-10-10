@@ -5,6 +5,7 @@ import pytest
 
 from backtesting import LatencyAwareBroker, Order, OrderType, Portfolio, TickBacktester
 from backtesting.order import PendingOrder
+from backtesting.order_book import MatchingEngine, OrderBook
 from backtesting.strategy import Strategy
 from backtesting.tick import Tick
 from backtesting.types import Bar, Trade
@@ -139,6 +140,23 @@ class TestLatencyBrokerMarket:
         lb.process_tick(make_tick(100.0, 0))
         assert lb.pending_count == 0
 
+    def test_partial_market_order_remainder_does_not_rest(self):
+        """Unmatched market quantity is left unfilled, not stranded as resting."""
+        portfolio = make_portfolio()
+        engine = MatchingEngine(OrderBook(), max_qty_per_level=1.0)
+        lb = LatencyAwareBroker(portfolio.broker, order_book=engine)
+        lb.submit(make_order(qty=5.0), pd.Timestamp(0, unit="ns"))
+
+        lb.process_tick(make_tick(100.0, 0, bid=99.9, ask=100.1))
+
+        position = portfolio.broker.positions["X"]
+        assert sum(lot.size for lot in position) == pytest.approx(1.0)
+        assert lb.pending_count == 0
+
+        # Later liquidity does not turn the market-order remainder into a limit.
+        lb.process_tick(make_tick(100.0, 1_000_000, bid=99.9, ask=100.1))
+        assert sum(lot.size for lot in position) == pytest.approx(1.0)
+
 
 class TestLatencyBrokerLimit:
     def test_limit_buy_fills_when_ask_crosses_below(self):
@@ -174,6 +192,18 @@ class TestLatencyBrokerLimit:
         # bid=100: fills
         lb.process_tick(make_tick(100.0, 1_000_000, bid=100.0))
         assert lb.pending_count == 0
+
+    def test_limit_buy_passes_through_price_improvement(self):
+        """Limit buy at 100 fills at the better ask when ask < limit."""
+        portfolio = make_portfolio()
+        lb = LatencyAwareBroker(portfolio.broker, ack_latency_ns=0)
+
+        order = make_order(side=1, qty=1.0, order_type=OrderType.LIMIT, limit_price=100.0)
+        lb.submit(order, pd.Timestamp(0, unit="ns"))
+
+        lb.process_tick(make_tick(99.0, 0, ask=99.0))
+        open_pos = portfolio.broker.positions.get("X", [])
+        assert open_pos[0].entry_price == pytest.approx(99.0)
 
     def test_limit_stays_pending_until_eligible_then_price(self):
         """LIMIT order respects both time delay AND price condition."""

@@ -16,6 +16,7 @@ def risk_adjusted_size(
     risk_per_trade: float,
     peak_equity: float,
     max_dd_halt: float,
+    contract_multiplier: float = 1.0,
 ) -> float:
     """Compute position size risking a fixed fraction of equity, with a drawdown kill-switch.
 
@@ -51,7 +52,7 @@ def risk_adjusted_size(
     # Linear scale-down: full size at 0% DD, zero at max_dd_halt
     dd_scale = max(0.0, 1.0 - current_dd / max_dd_halt)
 
-    risk_per_unit = abs(entry_price - stop_price)
+    risk_per_unit = abs(entry_price - stop_price) * contract_multiplier
     if risk_per_unit <= 0:
         return 0.0
 

@@ -49,6 +49,18 @@ class Strategy(ABC):
         self._peak_equity: float = 0.0
         self._bars_since_trade: int = 999
         self.cooldown_bars: int = 0
+        self.warmup_bars: int = 0
+        self._contract_multiplier: float = 1.0
+
+    def warmup_bar(self, bar: Bar) -> None:
+        """Prime indicator state without generating or recording a trade.
+
+        Walk-forward evaluation calls this for historical context bars before
+        each OOS window. Strategies with incremental indicators should override
+        it and update only indicator/signal history; portfolio, trade, and
+        cooldown state should remain untouched. ``warmup_bars`` controls the
+        default context length used by walk-forward evaluation.
+        """
 
     def _update_tracking(self, equity: float) -> None:
         """Update peak equity and bars-since-trade counter. Call at start of on_bar."""

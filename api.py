@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backtesting.backtest import Backtester
 from strategy_registry import STRATEGY_REGISTRY, get_strategy_param_space
@@ -37,6 +37,7 @@ class BacktestRequest(BaseModel):
     trend_tf: str = None
     trial_number: int
     starting_cash: int
+    freq_per_year: Optional[int] = Field(default=None, gt=0)
 
 
 class InstrumentsResponse(BaseModel):
@@ -91,7 +92,10 @@ def _execute_backtest(req: BacktestRequest) -> dict:
 
     strategy = strategy_cls(**req.params)
 
-    bt = Backtester(df=df, strategy=strategy, starting_cash=starting_cash)
+    bt = Backtester(
+        df=df, strategy=strategy, starting_cash=starting_cash,
+        freq_per_year=req.freq_per_year,
+    )
     equity_curve, trades = bt.run()
 
     equity_df = pd.DataFrame({
@@ -103,7 +107,9 @@ def _execute_backtest(req: BacktestRequest) -> dict:
         "final_equity": float(equity_curve[-1]),
         "pct_return": (equity_curve[-1] - starting_cash) / starting_cash * 100,
         "trades": len(trades),
-        "sharpe": compute_sharpe(pd.Series(equity_curve)),
+        "sharpe": compute_sharpe(
+            pd.Series(equity_curve), freq_per_year=bt.freq_per_year,
+        ),
     }
 
     trades_list = [
