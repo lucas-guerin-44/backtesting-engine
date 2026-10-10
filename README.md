@@ -3,9 +3,16 @@
 [![Tests](https://github.com/lucas-guerin-44/backtesting-engine/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-guerin-44/backtesting-engine/actions/workflows/test.yml)
 
 Event-driven backtesting engine built for execution realism.  
-Tick-granularity fills, gap-aware stops, stochastic latency modeling, and a FIFO order book.
+Gap-aware stops, explicit commission/slippage, market impact, and funding accrual,
+with a shared-account multi-instrument portfolio runner and a fast vectorized
+screening path.
 
 Data sourced from [lucas-guerin-44/datalake-api](https://github.com/lucas-guerin-44/datalake-api).
+
+> The experimental tick engine, latency broker, FIFO order book, and Cython tick
+> core live on the `experimental/tick-cython` branch. `main` is focused on the
+> bar-level event engine, the portfolio engine, and the pure-Python vectorized
+> screener/optimizer.
 
 ![Strategy Comparison](docs/strategy_comparison.png)
 *Four strategies + buy & hold on XAUUSD D1 (2012-2025). 5bps commission, 0.4bps spread. Walk-forward validated — see [research process](docs/research.md).*
@@ -14,8 +21,8 @@ Data sourced from [lucas-guerin-44/datalake-api](https://github.com/lucas-guerin
 
 Most backtesters optimize for speed or ease of use. This one optimizes for **not lying to you**.
 
-- **No lookahead bias.** Signals fire on bar close, fills happen at next bar's open (or next tick). The engine never sees the future.
-- **Execution realism.** Gap-aware stops fill at the open when price gaps through — not at the stop level. Stochastic latency models delay fills by configurable time. The FIFO order book handles partial fills and queue position.
+- **No lookahead bias.** Signals fire on bar close, fills happen at the next bar's open. The engine never sees the future.
+- **Execution realism.** Gap-aware stops fill at the open when price gaps through — not at the stop level.
 - **Explicit costs.** Commission and spread/slippage are configurable. Optional market impact scales with `sigma * sqrt(Q/ADV)` when ADV and daily volatility are supplied. Funding/swap accrues over elapsed bar time.
 - **Statistical honesty.** Walk-forward validation, Deflated Sharpe Ratio (corrects for multiple testing), bootstrap confidence intervals, permutation tests. The optimizer doesn't just find params — it tells you if they're real.
 
@@ -77,25 +84,41 @@ Benchmark the portfolio event loop with `python benchmarks/bench_portfolio.py --
 strategies/              4 included (trend, reversion, momentum, donchian)
     ↓ on_bar()
 backtesting/
-    backtest.py          Event-driven engine (~300k bars/sec)
-    portfolio_backtest.py Shared-account multi-instrument event engine
-    tick_backtest.py     Tick-level engine (~2.4M ticks/sec)
-    vectorized.py        Numpy engine (~700k bars/sec)
+    backtest.py          Event-driven engine (canonical, ~300k bars/sec)
+    portfolio_backtest.py Shared-account multi-instrument event engine (canonical)
+    vectorized.py        Pure-Python screening/optimizer fast path
     ↓
     broker.py            Gap-aware stops, slippage, commission
-    latency_broker.py    Stochastic delay (Gaussian, LogNormal, per-leg)
-    order_book.py        FIFO matching, partial fills, limit resting
-    ↓
     portfolio.py         Equity, drawdown, margin calls, funding accrual
     statistics.py        Sharpe, bootstrap CI, Deflated Sharpe Ratio
     optimizer.py         Optuna TPE + walk-forward validation
+    indicators.py        EMA/ATR/RSI kernels (optional Cython `_core` accel)
 ```
 
 **Bar-level flow:** stop exits → TP exits → strategy signal → entry at next bar open → portfolio update. When both stop and TP fire in the same bar, stops execute first (conservative default).
 
-The vectorized engine uses the same signal-close / next-bar-open entry timing. A signal on the final bar has no later open and is not filled.
+`Backtester` (single symbol) and `PortfolioBacktester` (shared-account, multi-instrument) are the **canonical** engines — they reproduce the real strategies' execution model (per-lot stops/take-profits, scaling in, margin calls, funding, market impact).
 
-**Tick-level flow:** stop/TP check at exact tick price → fill at next tick → aggregate into bar → `on_bar()` fires. No gap logic needed — ticks are the atomic price updates.
+## Vectorized engine (screening/optimizer fast path)
+
+`VectorizedBacktester` (`backtesting/vectorized.py` + `vectorized_signals.py`) is a
+pure-Python NumPy engine used as a fast optimizer/screening path
+(`optimize(..., engine="vectorized")`). It uses the same signal-on-close /
+fill-at-next-open convention as the canonical engine, but it is **not** a
+full execution model.
+
+Supported:
+
+- **One sequential position at a time** (no scaling in; exits before the next entry)
+- Fixed stop-loss / take-profit prices supplied per signal bar
+- `risk_per_trade` sizing with drawdown-scaled scale-down
+- Commission + slippage (bps), optional max-drawdown halt and cooldown
+
+**Not supported** (use the canonical engines for these): funding/swap, market
+impact, contract multipliers, multi-asset/portfolio accounting, trailing stops,
+partial fills, latency, and order-book/limit-order mechanics. Trade direction and
+counts broadly agree with the canonical engine, but they are not intended to
+match trade-for-trade — see `tests/test_cross_engine.py`.
 
 ## Strategies
 
@@ -121,8 +144,6 @@ class MyStrategy(Strategy):
                      take_profit=bar.close * 1.04)
 ```
 
-Tick-level strategies can override `on_tick()` and `manage_position_tick()` for intra-bar logic — both default to no-ops so bar-only strategies work unchanged.
-
 ## Optimization
 
 ```python
@@ -142,7 +163,7 @@ Walk-forward OOS folds warm incremental strategy state from prior training bars;
 
 ## Tests
 
-379 tests, ~4s. Cross-engine consistency checks, walk-forward contamination regression, indicator edge cases, and multi-asset portfolio execution.
+286 tests, ~5s. Cross-engine consistency checks, walk-forward contamination regression, indicator edge cases, and multi-asset portfolio execution. (The tick/latency/order-book suite runs on the `experimental/tick-cython` branch.)
 
 ```bash
 python -m pytest tests/ -x -q
@@ -153,8 +174,11 @@ python -m pytest tests/ -x -q
 - **[datalake-api](https://github.com/lucas-guerin-44/datalake-api)** — Data pipeline for OHLC/tick data
 - **[docs/research.md](docs/research.md)** — Research process: diagnosing overfitting, fixing methodology
 - **[docs/backtester_engineering.md](docs/backtester_engineering.md)** — Full engineering walkthrough
+- **`experimental/tick-cython` branch** — tick engine, latency broker, FIFO order book, Cython tick core
 
 ## Known limitations
 
 - Session filtering is at the data layer (`load_data()` in `utils.py`), not in the engine itself.
 - No corporate action adjustments (splits, dividends) — use adjusted data.
+- Intra-bar execution realism (tick fills, latency, order book, partial fills) is on `main`'s experimental branch and is not part of the canonical bar-level engines.
+- The vectorized engine is a screening fast path, not a full execution model (see above).

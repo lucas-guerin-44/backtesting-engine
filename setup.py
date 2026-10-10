@@ -5,7 +5,10 @@ Usage:
     python setup.py build_ext --inplace
 
 The Cython extension is optional — the engine falls back to pure Python
-if the compiled module is not available.
+if the compiled module is not available. ``_core`` accelerates the canonical
+indicator kernels (EMA/ATR/RSI) and the vectorized trade-chaining loop. The
+experimental tick core (``_tick_core``) lives on the ``experimental/tick-cython``
+branch.
 """
 
 from setuptools import setup, Extension
@@ -17,8 +20,6 @@ try:
     extensions = cythonize(
         [
             Extension("backtesting._core", ["backtesting/_core.pyx"],
-                       include_dirs=[np.get_include()]),
-            Extension("backtesting._tick_core", ["backtesting/_tick_core.pyx"],
                        include_dirs=[np.get_include()]),
         ],
         compiler_directives={

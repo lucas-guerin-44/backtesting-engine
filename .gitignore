@@ -40,7 +40,6 @@ docker-compose.override.yml
 # Cython build artifacts
 build/
 backtesting/_core.c
-backtesting/_tick_core.c
 *.pyd
 *.so
 *.egg-info/

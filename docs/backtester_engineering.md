@@ -5,6 +5,23 @@ why the abstractions exist, what problems each layer solves, and where each laye
 still falls short. It is not about trading strategy or quant methodology. For that,
 see `research.md`.
 
+## Scope: streamlined `main` vs experimental branch
+
+`main` carries the **canonical** bar-level engines — the event-driven `Backtester`
+(single symbol) and `PortfolioBacktester` (shared-account, multi-instrument) — plus
+the pure-Python `VectorizedBacktester` used as an optimizer/screening fast path.
+
+Sections 5–9 below describe the **experimental execution-realism stack** (tick
+engine, `LatencyAwareBroker`, FIFO order book, stochastic latency models, and the
+Cython tick core). That stack does not depend on and is not depended on by the
+canonical engines; it lives on the **`experimental/tick-cython`** branch. The tick
+Cython core (`_tick_core.*`) is not built on `main`.
+
+The vectorized core `_core.*` is kept on `main`: it accelerates the canonical
+indicator kernels (EMA/ATR/RSI) as well as the vectorized trade-chaining loop, and
+degrades to pure Python when not compiled (e.g. on Linux/CI, where only a
+Windows `.pyd` was previously shipped).
+
 ---
 
 ## 1. The Naive Backtester
@@ -190,7 +207,7 @@ after the fact.
 
 ---
 
-## 5. Tick-Level Backtesting: The Bar Granularity Problem
+## 5. Tick-Level Backtesting (experimental branch): The Bar Granularity Problem
 
 Even with a correct bar-level backtester, OHLC bars lose information.
 
@@ -248,7 +265,7 @@ is practical.
 
 ---
 
-## 6. What the Tick Backtester Still Gets Wrong
+## 6. What the Tick Backtester Still Gets Wrong (experimental branch)
 
 Even with tick-level data, the `Broker` fills orders with two assumptions that
 don't hold in practice:
@@ -275,7 +292,7 @@ slippage for trades that cross the spread and overstates it for others.
 
 ---
 
-## 7. The LatencyAwareBroker: Modeling Order Lifecycle
+## 7. The LatencyAwareBroker: Modeling Order Lifecycle (experimental branch)
 
 The `LatencyAwareBroker` wraps the existing `Broker` and adds two things the
 original broker cannot express: **time** between submission and fill, and
@@ -335,7 +352,7 @@ behavior exactly.
 
 ---
 
-## 8. The Order Book: Queue Position and Partial Fills
+## 8. The Order Book: Queue Position and Partial Fills (experimental branch)
 
 The simple latency broker fills a limit order the moment the market-side price
 crosses the limit level, for the full requested quantity. This misses two things
@@ -399,7 +416,7 @@ and calls `broker.open_trade()` on each partial fill as it arrives.
 
 ---
 
-## 9. Latency Models: From Fixed to Stochastic
+## 9. Latency Models: From Fixed to Stochastic (experimental branch)
 
 The original latency layer used a single constant: `ack_latency_ns`. Every order
 waited exactly that many nanoseconds before becoming eligible to fill. This is
@@ -467,6 +484,15 @@ and fill at the next bar's open. The vectorized engine is faster but requires
 careful index alignment to avoid accidentally using future data. They share
 fill timing, but strategy state and position management can still differ; the
 cross-engine tests check broad consistency rather than identical results.
+
+**What the vectorized engine does *not* model** (use `Backtester` /
+`PortfolioBacktester` instead): it holds only **one sequential position at a
+time**; it supports fixed stop/take-profit prices and `risk_per_trade` sizing
+with drawdown scaling; it applies commission + slippage in bps. It has no
+funding/swap, no market impact, no contract multipliers, no multi-asset or
+portfolio accounting, no trailing stops, and no partial fills or order-book /
+limit-order mechanics. It is a screening/optimizer fast path, not an execution
+model.
 
 **`_fill_at_tick_fast()` as inlined broker logic:** The tick backtester's hot
 loop does not call `broker.open_trade()` for fills. It inlines the equivalent
