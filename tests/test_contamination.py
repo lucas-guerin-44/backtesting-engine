@@ -1,7 +1,10 @@
 """Regression tests for walk-forward data contamination.
 
-Verifies that the two-stage walk-forward implementation in optimizer.py
-does NOT leak out-of-sample data into the training process.
+Verifies that ``optimizer.walk_forward()`` does NOT leak out-of-sample data
+into the training process. Note this helper runs a single full-space optimize
+per fold; the two-stage (lock signal params, then size only ``risk_per_trade``)
+procedure used in the research write-up is scripted separately in
+``examples/demo.py``.
 
 Background: an earlier version locked parameters from a full-dataset optimization
 before running walk-forward, which meant the OOS portion had already been seen

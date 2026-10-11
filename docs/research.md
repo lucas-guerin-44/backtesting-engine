@@ -28,7 +28,9 @@ The optimizer was finding `fast_period=33, slow_period=37`, a 4-bar gap between 
 
 Optimizing 5 parameters jointly with 30 trials gives the optimizer enough freedom to find noise. The curse of dimensionality: in a 5-dimensional space, 30 samples covers almost nothing, so the "best" trial is just the luckiest.
 
-**Fix:** Two-stage walk-forward. For each split, run a full optimization on the training data to find signal params, then lock those and optimize only `risk_per_trade` on the same training data. The test window is never seen by either stage. This is critical: an earlier version locked params from a full-dataset optimization, which contaminates the walk-forward because the locked params were selected by a process that saw the OOS windows.
+**Fix:** Two-stage walk-forward, scripted on top of `optimize()` in `examples/demo.py`. For each split, stage 1 runs a full optimization on the training data to find signal params; stage 2 locks those signal params and optimizes only `risk_per_trade` on the same training data. The test window is never seen by either stage. This is critical: an earlier version locked params from a full-dataset optimization, which contaminates the walk-forward because the locked params were selected by a process that saw the OOS windows.
+
+This two-stage procedure is **not** what the library helper `optimizer.walk_forward()` does. `walk_forward()` runs a *single* full-space optimization per fold and evaluates the resulting best params out-of-sample; it has no separate "lock signal params, then size only `risk_per_trade`" stage. All results below were produced by the scripted two-stage procedure in `examples/demo.py`, not by `optimizer.walk_forward()`. Treat the helper as the generic single-stage validator and the two-stage script as the research methodology.
 
 ### Problem 4: Wrong Strategy on Wrong Asset
 
@@ -52,7 +54,7 @@ This matters for interpreting the results: a momentum strategy with a 200 EMA fi
 
 ### Single-Asset: Momentum on XAUUSD
 
-**Two-stage walk-forward (clean, no data leakage):**
+**Two-stage walk-forward (scripted in `examples/demo.py`; clean, no data leakage):**
 
 Each split finds its own signal params on training data only, then evaluates on unseen test data.
 
@@ -73,13 +75,14 @@ The signal params did not converge across splits (lookback ranged from 6 to 32),
 
 The holdout is clean and strong, but it covers a period (2023-2025) where gold was in a historic bull run. A momentum strategy with a long-only bias will naturally outperform during exactly this kind of regime.
 
-**Statistical significance (on full 2012-2025 baseline, default params):**
-- Bootstrap 95% CI: [0.37, 1.21], doesn't cross zero
-- Survives Deflated Sharpe Ratio after 1,000 trials tested
+**Statistical significance (on full 2012-2025 baseline, default params):** from `compute_statistical_report` (`backtesting/statistics.py`). The gate `passes_statistical_gate` requires **all three** of the following:
+- Bootstrap 95% CI excludes zero — reported [0.37, 1.21]
+- Permutation test p-value ≤ 0.05 (block sign-flip null, `block_size=5`)
+- Deflated Sharpe p-value ≤ 0.05 — reported as surviving deflation after 1,000 trials tested
 
 ### Single-Asset: Donchian on EURUSD
 
-**Two-stage walk-forward (clean, no data leakage):**
+**Two-stage walk-forward (scripted in `examples/demo.py`; clean, no data leakage):**
 
 | Split | Train | Test | IS Sharpe | OOS Sharpe | OOS Return | OOS Max DD | OOS Trades |
 |---|---|---|---|---|---|---|---|
@@ -99,7 +102,7 @@ A note on negative degradation: while degradation of -0.08 looks encouraging (OO
 
 The portfolio optimizer hit the same overfitting wall as single assets, but at a larger scale. With 6 assets and 4-5 signal params each, the full search space is 25+ dimensions. Even 200 Optuna trials can't explore that meaningfully.
 
-**Two-stage walk-forward (clean, no data leakage):**
+**Two-stage walk-forward (scripted in `examples/demo.py`; clean, no data leakage):**
 
 Each split runs its own full optimization on training data to find signal params, locks those, optimizes risk_per_trade on training data, then evaluates on unseen test data.
 
@@ -129,7 +132,7 @@ In order of impact:
 
 1. **The 200 EMA filter** is the single most impactful variable. On every strategy and every asset, it improved results. It's not a signal refinement but a regime filter that keeps you from fighting the macro trend. It's also the main reason the strategies appear to have alpha: they're structurally long during bull markets and flat during bear markets. This is a form of market timing, not pure momentum/breakout alpha.
 2. **More data**, going from 6 to 13 years was the second biggest unlock. Not because the strategies changed, but because you can't measure a Sharpe ratio from 2 trades.
-3. **Clean walk-forward methodology**, running both optimization stages inside each training window eliminates data leakage. The earlier approach (locking params from full-dataset optimization) inflated single-asset OOS Sharpe from 0.28 to 2.0, a 7x overstatement. At the portfolio level, contaminated OOS Sharpe was 0.73 vs. the clean 0.65, a smaller gap, but the principle matters. The contamination is subtle and easy to miss.
+3. **Clean walk-forward methodology**, running both optimization stages inside each training window eliminates data leakage. The earlier approach (locking params from full-dataset optimization) inflated single-asset OOS Sharpe from 0.28 to 2.0, a 7x overstatement. At the portfolio level, contaminated OOS Sharpe was 0.73 vs. the clean 0.65, a smaller gap, but the principle matters. The contamination is subtle and easy to miss. (Again: this is the scripted two-stage procedure in `examples/demo.py`; the `optimizer.walk_forward()` helper only runs the single full-space optimize per fold.)
 4. **Testing every strategy on every asset**, the "right" strategy for an asset class isn't always the obvious one. Mean Reversion on EURUSD was the "obvious" choice and the worst performer. Donchian Breakout was the actual winner.
 5. **Weight capping on allocators**, Risk Parity and Correlation-Aware allocators were putting 50-68% into low-volatility assets and starving the portfolio of exposure. Capping individual weights at 30% and redistributing the excess turned Risk Parity from 4 trades and -0.78% to 138 trades and +11.35%.
 
@@ -138,6 +141,6 @@ In order of impact:
 - **Gold results are mostly beta.** A long-only strategy on gold during a 13-year bull market is largely riding the trend, not generating alpha. The lower drawdown vs buy & hold is real, but the return is not independent of the market direction.
 - **The signal is regime-dependent.** Momentum on gold works during strong trends and fails during chop. The parameters don't stabilize across walk-forward splits — there isn't one persistent signal, it's a strategy that suits certain environments.
 - **Strategy mining.** Four strategies were tested on each asset before picking the winners. The 200 EMA filter was chosen because it improved everything. The walk-forward split parameters were tuned. All of these are research decisions made by looking at the data, and the walk-forward can't account for them.
-- **Costs are underestimated.** Fixed 2-5 bps slippage doesn't reflect the reality that breakout/momentum entries happen during volatility spikes when spreads are wider. No overnight funding costs are modeled.
+- **Costs are underestimated.** Fixed 2-5 bps slippage doesn't reflect the reality that breakout/momentum entries happen during volatility spikes when spreads are wider. The engine *does* model overnight funding/swap: `Portfolio.accrue_funding()` charges long/short swap over elapsed bar time (`backtesting/portfolio.py`), driven from both the single-asset loop (`backtesting/backtest.py`) and the portfolio engine (`backtesting/portfolio_backtest.py`). These research runs, however, left `funding_rate_annual`/`funding_rate_short` at their `0.0` defaults, so the reported results still exclude financing.
 - **Three walk-forward splits is not a large sample.** The OOS averages have wide confidence intervals. Three data points can't prove much statistically.
-- **The statistical tests have assumptions that don't fully hold.** The bootstrap assumes returns are independent (they're not — volatility clusters). The walk-forward has no gap between training and test windows, so there's some leakage at the boundary. These are known issues I haven't addressed in the implementation.
+- **The statistical tests have assumptions that don't fully hold.** The bootstrap resamples returns i.i.d., so it assumes independence (they're not — volatility clusters); the permutation test only partially compensates by flipping signs in short blocks (`block_size=5`). The walk-forward has no gap between training and test windows, so there's some leakage at the boundary. These are known issues I haven't addressed in the implementation — the tests are implemented and wired into `optimize()`/`walk_forward()` (`backtesting/statistics.py`), but the independence and boundary-gap assumptions remain.

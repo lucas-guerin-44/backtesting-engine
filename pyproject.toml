@@ -5,30 +5,33 @@ description = "Event-driven and vectorized backtesting engine for trading strate
 requires-python = ">=3.11"
 license = {text = "MIT"}
 
+# Pinned to the known-good versions in .venv (see requirements.lock for the
+# full transitive freeze). Update deliberately: bump here, re-install into a
+# clean venv, run the tests, then regenerate requirements.lock.
 dependencies = [
-    "pandas>=2.0.0",
-    "numpy>=1.24.0",
-    "requests>=2.31.0",
-    "python-dotenv>=1.0.0",
-    "optuna>=3.0.0",
-    "scipy>=1.10.0",
+    "pandas==3.0.6",
+    "numpy==2.5.3",
+    "requests==2.34.2",
+    "python-dotenv==1.2.4",
+    "optuna==5.0.0",
+    "scipy==1.18.1",
 ]
 
 [project.optional-dependencies]
 api = [
-    "fastapi>=0.100.0",
-    "uvicorn>=0.23.0",
-    "pydantic>=2.0.0",
+    "fastapi==0.142.2",
+    "uvicorn==0.54.0",
+    "pydantic==2.13.5",
 ]
 dashboard = [
-    "streamlit>=1.28.0",
-    "altair>=5.0.0",
+    "streamlit==1.65.0",
+    "altair==6.3.0",
 ]
 plot = [
-    "matplotlib>=3.7.0",
+    "matplotlib==3.11.2",
 ]
 dev = [
-    "pytest>=7.0.0",
+    "pytest==9.1.1",
 ]
 all = [
     "backtesting-engine[api,dashboard,plot,dev]",
@@ -39,7 +42,18 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
+# Installable top-level library modules. Keep this list explicit: it is the
+# single source of truth for what ships (package metadata lives in [project]
+# above; setup.py only builds the optional Cython extension).
 py-modules = ["utils", "config", "optimizer", "results_db", "strategy_registry"]
+# api.py (FastAPI backend) and frontend.py (Streamlit dashboard) are
+# intentionally EXCLUDED here. They are optional dev/demo tools, not library
+# code: they pull heavy optional deps (fastapi/streamlit — see the [api] and
+# [dashboard] extras) and are meant to be run from a source checkout against
+# the datalake API, not pip-installed as part of the engine. Add them to
+# py-modules only if that deployment model changes.
 
 [tool.setuptools.packages.find]
 include = ["backtesting*", "strategies*"]
+# The optional Cython extension backtesting._core is declared and built in
+# setup.py, not discovered by the package finder.

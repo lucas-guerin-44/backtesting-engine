@@ -32,6 +32,24 @@ Most backtesters optimize for speed or ease of use. This one optimizes for **not
 pip install -e .    # from backtesting-engine/
 ```
 
+### Reproducible installs
+
+Dependencies are pinned exactly in `pyproject.toml` (`[project].dependencies`,
+the single source of truth). `setup.py` is build-only (the optional Cython
+extension). `requirements.txt` is a flat pinned export of the pyproject
+dependencies + extras for Docker/CI, and `requirements.lock` is the full
+transitive freeze of the known-good environment.
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.lock    # exact known-good transitive set
+pip install -e .                    # the engine itself, from this checkout
+```
+
+To bump a dependency deliberately: edit `pyproject.toml`, `pip install -e ".[all]"`
+into a clean venv, run `pytest`, then refresh `pip freeze > requirements.lock` and
+the flat `requirements.txt`. Don't edit the pins ad hoc.
+
 ```python
 from backtesting.backtest import Backtester
 from backtesting.types import BacktestConfig
