@@ -2,7 +2,7 @@
 name = "backtesting-engine"
 version = "2.0.0"
 description = "Event-driven and vectorized backtesting engine for trading strategies"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = {text = "MIT"}
 
 # Pinned to the known-good versions in .venv (see requirements.lock for the
